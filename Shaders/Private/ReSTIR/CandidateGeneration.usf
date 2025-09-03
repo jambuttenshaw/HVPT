@@ -9,6 +9,7 @@
 #include "../../Shared/HVPTDefinitions.h"
 
 #include "ReSTIRUtils.ush"
+#include "PathEvaluation.ush"
 
 
 #ifndef MULTIPLE_BOUNCES

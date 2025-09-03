@@ -1,0 +1,262 @@
+#ifndef PATHEVALUATION_H
+#define PATHEVALUATION_H
+
+#include "/Engine/Private/ParticipatingMediaCommon.ush"
+
+#include "/Engine/Private/PathTracing/PathTracingCommon.ush"
+#include "/Engine/Private/PathTracing/Utilities/PathTracingRandomSequence.ush"
+#include "/Engine/Private/PathTracing/Material/PathTracingMaterialSampling.ush"
+#include "/Engine/Private/PathTracing/Volume/PathTracingVolumeCommon.ush"
+#include "/Engine/Private/PathTracing/Volume/PathTracingFog.ush"
+
+#include "../Utils/TrackingUtils.ush"
+
+#include "ReSTIRUtils.ush"
+
+
+#ifndef MULTIPLE_BOUNCES
+#define MULTIPLE_BOUNCES true
+#endif
+
+#ifndef MAX_EXTRA_BOUNCES
+#define MAX_EXTRA_BOUNCES 7
+#endif
+
+#ifndef USE_SURFACE_CONTRIBUTIONS
+#define USE_SURFACE_CONTRIBUTIONS true
+#endif
+
+
+//
+// --- LIGHTING 
+//
+
+template<
+bool bIsFinalShading>
+float3 HVPT_CalculateTransmittance(FRayDesc Ray, inout RandomSequence RandSequence, out bool bEscaped)
+{
+	float3 Transmittance;
+	bEscaped = false;
+	if (bIsFinalShading)
+	{
+		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance(Ray, 0.1f, RandSequence);
+		Transmittance = Result.Transmittance;
+		bEscaped = Result.bEscaped;
+	}
+	// TODO: Use preprocessor and permutations to select transmittance method
+	else if (true)
+	{
+		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance(Ray, 1.f, RandSequence);
+		Transmittance = Result.Transmittance;
+		bEscaped = Result.bEscaped;
+	}
+	else
+	{
+		//Transmittance = HVPT_RatioTracking_Majorant(Ray, RandSequence);
+	}
+	return Transmittance;
+}
+
+// Returns true if visible
+// Returns false if not visible
+bool HVPT_IsShadowed(float3 Origin, float3 Direction, float TMin, float TMax)
+{
+	FRayDesc Ray;
+	Ray.Origin = Origin;
+	Ray.Direction = Direction;
+	Ray.TMin = TMin;
+	Ray.TMax = TMax;
+
+	// Try opaque surfaces first
+	FMinimalPayload Payload = TraceVisibilityRay(
+				TLAS,
+				RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+				PATHTRACER_MASK_SHADOW,
+				Ray);
+
+	return Payload.IsHit();
+}
+
+template<
+bool bIsFinalShading>
+float3 HVPT_CalculateLightVisibility(float3 TranslatedWorldPos, FLightSample LightSample, inout RandomSequence RandSequence)
+{
+	float3 ScatteringVisibility = 1.0f;
+
+	// Only trays opaque rays for final shading
+	// TODO: Allow this to be configured via CVars / Investigate if it is a worthwhile option
+	if (bIsFinalShading)
+	{
+		if (HVPT_IsShadowed(TranslatedWorldPos, LightSample.Direction, 0.0f, LightSample.Distance))
+		{
+			return 0.0f;
+		}
+	}
+
+	FRayDesc LightRay = HVPT_CreateRayDesc < false > (TranslatedWorldPos, LightSample.Direction, 0.0f, LightSample.Distance);
+	FVolumeIntersection VolumeIntersection = HVPT_Intersect(LightRay.Origin, LightRay.Direction, LightRay.TMin, LightRay.TMax);
+	if (VolumeIntersection.HitVolume())
+	{
+		LightRay.TMin = VolumeIntersection.VolumeTMin;
+		LightRay.TMax = VolumeIntersection.VolumeTMax;
+
+		bool bEscaped = false;
+		ScatteringVisibility = HVPT_CalculateTransmittance < bIsFinalShading > (LightRay, RandSequence, bEscaped);
+
+#if APPLY_VOLUMETRIC_FOG
+		if (bEscaped)
+		{
+			LightRay.TMin = VolumeIntersection.VolumeTMax;
+			LightRay.TMax = LightSample.Distance;
+			
+			ScatteringVisibility *= saturate(FogGetTransmittance(LightRay.Origin, LightRay.Direction, LightRay.TMin, LightRay.TMax));
+		}
+#endif
+	}
+
+	return ScatteringVisibility;
+}
+
+
+//
+// --- ReSTIR PATH EVALUATION
+//
+
+template<
+bool bIsFinalShading>
+float3 HVPT_EvaluateF(
+	FHVPT_Reservoir Reservoir,
+#if MULTIPLE_BOUNCES
+	FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES],
+#endif
+	FRayDesc Ray,
+	inout RandomSequence RandSequence
+)
+{
+	// Target function PHat is an approximation of the real path contribution F
+	float3 F = 1.0f;
+
+	// Set TMax according to hit point of reservoir
+	Ray.TMax = Reservoir.Depth;
+
+	// Sample volume properties at scattering event
+	float3 TranslatedWorldPos = Ray.Origin + Ray.TMax * Ray.Direction;
+	FVolumeShadedResult Properties = HVPT_GetDensity(TranslatedWorldPos);
+
+	// Calculate visibility along primary ray
+	bool Dummy;
+	F *= HVPT_CalculateTransmittance < bIsFinalShading > (Ray, RandSequence, Dummy);
+
+	if (!any(F > 0.0f))
+	{
+		return 0;
+	}
+
+#if MULTIPLE_BOUNCES
+#if USE_SURFACE_CONTRIBUTIONS
+	bool bSurfaceHit = false;
+#endif
+
+	// Follow path through however many bounces it performs
+	for (uint Bounce = 0; Bounce < Reservoir.NumExtraBounces; Bounce++)
+	{
+		float3 w_i = Bounces[Bounce].Direction;
+		float z_i = Bounces[Bounce].Distance;
+
+#if USE_SURFACE_CONTRIBUTIONS
+		// Should only ever be true on the last bounce
+		bSurfaceHit = z_i == POSITIVE_INFINITY;
+#endif
+
+		// Calculate phase at the vertex we are leaving
+		float Phase = HenyeyGreensteinPhase(Properties.PhaseG, dot(-Ray.Direction, w_i));
+
+		Ray = HVPT_CreateRayDesc(TranslatedWorldPos, w_i, 0.0f, z_i);
+
+		// Calculate transmittance along ray
+		float3 Transmittance = HVPT_CalculateTransmittance<bIsFinalShading>(Ray, RandSequence, Dummy);
+
+		F *= Transmittance * Properties.SigmaSHG * Phase;
+
+		// Get properties at new destination point of ray
+		TranslatedWorldPos = Ray.Origin + Ray.TMax * Ray.Direction;
+		Properties = HVPT_GetDensity(TranslatedWorldPos);
+	}
+
+#if USE_SURFACE_CONTRIBUTIONS
+	// Surface hits are only possible in multi-bounce setups, as no surface hits are considered for primary rays.
+	if (bSurfaceHit)
+	{
+		// Handle surface hit
+		// Trace ray to surface
+		Ray.TMin = 0.0f;
+		Ray.TMax = POSITIVE_INFINITY;
+
+		FRayCone RayCone = (FRayCone) 0;
+		FMaterialClosestHitPayload MaterialPayload = TraceMaterialRay(
+			TLAS,
+			0,
+			PATHTRACER_MASK_ALL,
+			Ray,
+			RayCone,
+			false,
+			true,
+			false
+		);
+
+		if (Reservoir.bEmissionPath)
+		{
+			// TODO: Do I need to include geometry term G = 1 / (z * z)?
+			F *= MaterialPayload.Radiance;
+		}
+		else
+		{
+			// Sample light source
+			FPathTracingPayload Payload = HVPT_CreateSurfaceHitPayload(MaterialPayload);
+			
+			// Pick a light source to sample
+			FLightSample LightSample = SampleLight(Reservoir.LightId, Reservoir.LightSample, Payload.TranslatedWorldPos, Payload.WorldNormal);
+			float3 LightRadiance = LightSample.RadianceOverPdf * LightSample.Pdf;
+
+			// Eval material
+			// TODO: Handle diffuse specular scale for non media materials
+			// TODO: Handle material eval PDF
+			FMaterialEval MaterialEval = EvalMaterial(-Ray.Direction, LightSample.Direction, Payload, float2(1.0f, 0.0f));
+
+			// Trace visibility ray
+			float3 Visibility = HVPT_CalculateLightVisibility<false>(TranslatedWorldPos, LightSample, RandSequence);
+
+			F *= Visibility * MaterialEval.Weight * MaterialEval.Pdf * LightRadiance;
+		}
+	}
+	else
+	{
+#endif // USE_SURFACE_CONTRIBUTIONS
+#endif // MULTIPLE_BOUNCES
+
+	// Calculate illumination from light
+	if (Reservoir.bEmissionPath)
+	{
+		float3 SigmaA = (Properties.SigmaT - Properties.SigmaSHG);
+		F *= /*SigmaA * */Properties.Emission;
+	}
+	else
+	{
+		// It is scattering path
+		// Calculate light from light source and then calculate transmittance to that light source
+		FLightSample LightSample = SampleLight(Reservoir.LightId, Reservoir.LightSample, TranslatedWorldPos, 0);
+		float3 LightRadiance = LightSample.RadianceOverPdf * LightSample.Pdf;
+
+		float Phase = HenyeyGreensteinPhase(Properties.PhaseG, dot(-Ray.Direction, LightSample.Direction));
+		float3 ScatterVisibility = HVPT_CalculateLightVisibility < bIsFinalShading > (TranslatedWorldPos, LightSample, RandSequence);
+
+		F *= ScatterVisibility * Properties.SigmaSHG * Phase * LightRadiance;
+	}
+
+#if MULTIPLE_BOUNCES && USE_SURFACE_CONTRIBUTIONS
+	}
+#endif
+	return F;
+}
+
+#endif
