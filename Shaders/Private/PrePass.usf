@@ -1,0 +1,282 @@
+
+#include "VoxelGrid/VoxelGridTypes.ush"
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/VelocityCommon.ush"
+#include "/Engine/Private/DeferredShadingCommon.ush"
+
+#include "/Engine/Shared/RayTracingDefinitions.h"
+#include "/Engine/Shared/PathTracingDefinitions.h"
+
+#include "/Engine/Private/RayTracing/RayTracingCommon.ush"
+#include "/Engine/Private/PathTracing/PathTracingCommon.ush"
+
+#include "/Engine/Private/ScreenPass.ush"
+
+#include "/Engine/Private/PathTracing/Utilities/PathTracingRandomSequence.ush"
+#include "/Engine/Private/PathTracing/Volume/PathTracingVolumeCommon.ush"
+
+#include "Utils/PathTracingUtils.ush"
+#include "Utils/TrackingUtils.ush"
+
+
+SCREEN_PASS_TEXTURE_VIEWPORT(InputViewPort)
+SCREEN_PASS_TEXTURE_VIEWPORT(OutputViewPort)
+
+#ifndef WRITE_GBUFFER
+#define WRITE_GBUFFER true
+#endif
+
+#ifndef DENSITY_GRADIENT_NORMAL
+#define DENSITY_GRADIENT_NORMAL true
+#endif
+
+#ifndef TRANSMITTANCE_MODE
+#define TRANSMITTANCE_MODE 1
+#endif
+
+#ifndef STOCHASTIC_GBUFFER_WRITES
+#define STOCHASTIC_GBUFFER_WRITES true
+#endif
+
+#ifndef WRITE_VELOCITY
+#define WRITE_VELOCITY true
+#endif
+
+#ifndef DEBUG_VISUALIZE_VELOCITY
+#define DEBUG_VISUALIZE_VELOCITY false
+#endif
+
+// Uses a copy of the scene depth, that was made before writing HVPT into it
+Texture2D<float> SceneDepthTexture_Copy;
+
+uint TemporalSeed;
+
+float Sharpness;
+
+// The optical depth threshold at which volumetric fog will be composited
+float FogComposition_OpticalDepth;
+
+RWTexture2D<float2> RWFeatureTexture;
+RWTexture2D<float4> RWVelocityTexture;
+
+
+struct FHVPT_GBufferData
+{
+	float Transmittance;
+	float InitialInteractionDistance;
+
+	// We get the rest of the GBuffer data
+	// for nearly free from calculating transmittance
+	float3 Albedo;
+	float DeviceZ;
+	float3 Normal;
+	float4 Velocity;
+};
+
+
+float3 HVPT_CalculateNormal(float3 TranslatedWorldPos)
+{
+#if DENSITY_GRADIENT_NORMAL
+	float3 Delta = (HVPT_GetTranslatedWorldPos(HVPT_OrthoGrid.TopLevelGridWorldBoundsMax) - HVPT_GetTranslatedWorldPos(HVPT_OrthoGrid.TopLevelGridWorldBoundsMin))
+			/ HVPT_OrthoGrid.TopLevelGridResolution;
+	float4 D = float4(Delta, 0.0f);
+
+	// Use the gradient of the density field as a normal
+	// Calculate the gradient using central differencing method
+#define DENSITY(delta) Luminance(HVPT_GetOrthoVoxelGridDensity(TranslatedWorldPos + delta).SigmaT)
+#define DENSITY_GRAD(delta) (DENSITY(-delta) - DENSITY(delta))
+
+	float3 n = float3(
+		DENSITY_GRAD(D.xww) / (2.0f * Delta.x),
+		DENSITY_GRAD(D.wyw) / (2.0f * Delta.y),
+		DENSITY_GRAD(D.wwz) / (2.0f * Delta.z)
+	);
+
+	// To avoid invalid normals, I just place the up vector in the case of a missing gradient vector.
+	// As the normal is only assisting denoising, this doesn't appear to cause much in the way of visual artefacts.
+	return all(n == 0.0f) ? float3(0, 0, 1) : normalize(n);
+#else
+	return 0.f;
+#endif
+}
+
+
+float4 HVPT_CalculateEncodedScreenSpaceVelocity(float3 WorldSpacePosition)
+{
+	// Sample velocity from the volume
+	float3 WorldSpaceVelocity = HVPT_GetVelocity(WorldSpacePosition);
+	float3 PrevWorldSpacePosition = WorldSpacePosition - WorldSpaceVelocity;
+
+	// Project velocity into screen space
+	float4 ClipPos = mul(float4(WorldSpacePosition, 1), View.TranslatedWorldToClip);
+	ClipPos /= ClipPos.w;
+
+	// Using View.PrevTranslatedWorldToClip causes AA jitter in the volume
+	// doing two matrix multiplications instead fixed that
+	float4 PrevClipPos = mul(float4(PrevWorldSpacePosition, 1), View.TranslatedWorldToClip);
+	PrevClipPos /= PrevClipPos.w;
+	PrevClipPos = mul(PrevClipPos, View.ClipToPrevClip);
+
+	float3 ScreenSpaceVelocity = Calculate3DVelocity(ClipPos, PrevClipPos);
+
+	return EncodeVelocityToTexture(ScreenSpaceVelocity);
+}
+
+
+FHVPT_GBufferData HVPT_CalculateGBufferData(uint2 PixelCoord)
+{
+	uint LinearPixelIndex = PixelCoord.y * View.ViewSizeAndInvSize.x + PixelCoord.x;
+
+	float DeviceZ = SceneDepthTexture_Copy.Load(uint3(PixelCoord, 0)).r;
+	FRayDesc Ray = HVPT_CreateRayDesc<true>(PixelCoord, DeviceZ);
+
+	RandomSequence RandSequence = (RandomSequence)0;
+	RandomSequence_Initialize(RandSequence, LinearPixelIndex, TemporalSeed);
+
+	float3 Transmittance = 1.0f;
+	FHVPT_GBufferData GBufferData = (FHVPT_GBufferData)0;
+
+	// Ray must be bounded by the HV AABB for tracking to work correctly
+	FVolumeIntersection VolIntersect = HVPT_Intersect(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
+	if (VolIntersect.HitVolume())
+	{
+		Ray.TMin = VolIntersect.VolumeTMin;
+		Ray.TMax = VolIntersect.VolumeTMax;
+
+#if TRANSMITTANCE_MODE == 0
+		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance(Ray, 0.1f, RandSequence);
+#elif TRANSMITTANCE_MODE == 1
+		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance<true, true>(Ray, 0.1f, RandSequence, FogComposition_OpticalDepth);
+#endif
+
+		Transmittance = Result.Transmittance;
+		float Distance = Result.Distance_Sample;
+		GBufferData.InitialInteractionDistance = Result.Distance_InitialInteraction;
+
+#if (TRANSMITTANCE_MODE == 1 && STOCHASTIC_GBUFFER_WRITES)
+		float Rand = RandomSequence_GenerateSample1D(RandSequence);
+		float Weight = max3(Transmittance.x, Transmittance.y, Transmittance.z);
+		if (all(Transmittance == 0.0f) || (Rand > Weight))
+#else
+		if (Distance != POSITIVE_INFINITY)
+#endif
+		{
+			float3 WorldPosition = Ray.Origin + Ray.Direction * Distance;
+			FVolumeShadedResult Properties = HVPT_GetDensity(WorldPosition);
+
+			GBufferData.DeviceZ = ConvertToDeviceZ(Distance);
+			GBufferData.Albedo = saturate(Properties.SigmaSHG / Properties.SigmaT);
+			GBufferData.Normal = HVPT_CalculateNormal(WorldPosition);
+
+#if DEBUG_VISUALIZE_VELOCITY
+			GBufferData.Albedo = HVPT_GetVelocity(WorldPosition);
+#endif
+
+#if WRITE_VELOCITY
+				GBufferData.Velocity = HVPT_CalculateEncodedScreenSpaceVelocity(WorldPosition);
+#endif
+		}
+	}
+
+	GBufferData.Transmittance = (Transmittance.x + Transmittance.y + Transmittance.z) / 3.0f;
+	GBufferData.InitialInteractionDistance = min(GBufferData.InitialInteractionDistance, ConvertFromDeviceZ(GBufferData.DeviceZ));
+
+	return GBufferData;
+}
+
+
+// Does not write to PIXELSHADEROUTPUT_MRT0: This will be the (indirect) radiance, which we will calculate in the subsequent radiance pass
+void HVPT_PrePassPS(
+	float2 InUV : TEXCOORD0,
+	float4 SvPosition : SV_Position
+#if WRITE_GBUFFER
+#if PIXELSHADEROUTPUT_MRT1
+	, out float4 OutTarget1 : SV_Target1
+#endif
+#if PIXELSHADEROUTPUT_MRT2
+	, out float4 OutTarget2 : SV_Target2
+#endif
+#if PIXELSHADEROUTPUT_MRT3
+	, out float4 OutTarget3 : SV_Target3
+#endif
+#if PIXELSHADEROUTPUT_MRT4
+	, out float4 OutTarget4 : SV_Target4
+#endif
+#if PIXELSHADEROUTPUT_MRT5
+	, out float4 OutTarget5 : SV_Target5
+#endif
+#if PIXELSHADEROUTPUT_MRT6
+	, out float4 OutTarget6 : SV_Target6
+#endif
+#if PIXELSHADEROUTPUT_MRT7
+	, out float4 OutTarget7 : SV_Target7
+#endif
+	, out float OutDepth : SV_Depth
+#endif // WRITE_GBUFFER
+)
+{
+	uint2 PixelPos = min(SvPosition.xy + InputViewPort_ViewportMin, InputViewPort_ViewportMax - 1);
+	FHVPT_GBufferData VolumeGBufferData = HVPT_CalculateGBufferData(PixelPos);
+
+	if (VolumeGBufferData.DeviceZ == 0.0f)
+	{
+		// No volume exists for this pixel
+		discard;
+	}
+
+	RWFeatureTexture[PixelPos] = float2(VolumeGBufferData.Transmittance, VolumeGBufferData.InitialInteractionDistance);
+
+#if WRITE_VELOCITY
+	RWVelocityTexture[PixelPos] = VolumeGBufferData.Velocity;
+#endif
+
+#if WRITE_GBUFFER
+
+	// Encode into GBuffer data
+	FGBufferData GBufferData = (FGBufferData) 0;
+	GBufferData.Depth = VolumeGBufferData.DeviceZ;
+	GBufferData.WorldNormal = VolumeGBufferData.Normal;
+	GBufferData.DiffuseColor = VolumeGBufferData.Albedo;
+	GBufferData.SpecularColor = 0.0f;
+	GBufferData.BaseColor = VolumeGBufferData.Albedo;
+	// Turning up the metallic has a sharpening effect on the volume after denoising with DLSS-RR
+	GBufferData.Metallic = Sharpness;
+	GBufferData.Specular = 0.0f;
+	// Low roughness makes the volume less temporally stable - I assume DLSS is treating it as more 'reflective' and thus more view-dependent
+	GBufferData.Roughness = 1.0f;
+	// TODO: Compare effect of using unlit vs medium
+	GBufferData.ShadingModelID = SHADINGMODELID_MEDIUM;
+	// Written to texture via UAV
+	GBufferData.Velocity = 0.0f;
+
+	// Encode data into MRT format
+	FPixelShaderOut PSOut = (FPixelShaderOut) 0;
+	EncodeGBufferToMRT(PSOut, GBufferData, /* QuantizationBias = */0.0f);
+
+	OutDepth = GBufferData.Depth;
+	
+#if PIXELSHADEROUTPUT_MRT1
+	OutTarget1 = PSOut.MRT[1];
+#endif
+#if PIXELSHADEROUTPUT_MRT2
+	OutTarget2 = PSOut.MRT[2];
+#endif
+#if PIXELSHADEROUTPUT_MRT3
+	OutTarget3 = PSOut.MRT[3];
+#endif
+#if PIXELSHADEROUTPUT_MRT4
+	OutTarget4 = PSOut.MRT[4];
+#endif
+#if PIXELSHADEROUTPUT_MRT5
+	OutTarget5 = PSOut.MRT[5];
+#endif
+#if PIXELSHADEROUTPUT_MRT6
+	OutTarget6 = PSOut.MRT[6];
+#endif
+#if PIXELSHADEROUTPUT_MRT7
+	OutTarget7 = PSOut.MRT[7];
+#endif
+
+#endif // WRITE_GBUFFER
+}

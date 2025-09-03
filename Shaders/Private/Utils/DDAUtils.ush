@@ -1,0 +1,176 @@
+#ifndef DDAUTILS_H
+#define DDAUTILS_H
+
+#include "../VoxelGrid/VoxelGridTypes.ush"
+#include "../VoxelGrid/VoxelGridUtils.ush"
+#include "../VoxelGrid/VoxelGridBuildUtils.ush"
+
+#include "/Engine/Private/MortonCode.ush"
+
+
+// DDA context used to iterate through cells in the grid along a ray
+struct FHVPT_GridIterator
+{
+	float3 RayMarchPos; // Current position
+	float RayMarchT; // Current T
+
+	float DeltaT; // Step size through the current voxel
+	float TMax; // End/exit T - whichever is first
+
+	float3 Direction;
+	float3 InvDirection;
+
+	float3 BoundsHitT; // T value for next hit on each axis
+
+	float DistanceScale; // Scale factor for distances out of voxel space
+
+	// WorldSpace_TMax is required to compute a scaling factor for distance values
+	void Init(float3 VoxelSpace_Begin, float3 VoxelSpace_End, float WorldSpace_TMax)
+	{
+		RayMarchPos = VoxelSpace_Begin;
+		Direction = VoxelSpace_End - VoxelSpace_Begin;
+
+		RayMarchT = 0.0f;
+		TMax = length(Direction);
+
+		DistanceScale = WorldSpace_TMax / TMax;
+
+		Direction /= TMax;
+		InvDirection = 1.0f / Direction;
+
+		float3 VoxelBoundsPos;
+		VoxelBoundsPos.x = sign(Direction.x) > 0 ? floor(RayMarchPos.x) + 1 : ceil(RayMarchPos.x) - 1;
+		VoxelBoundsPos.y = sign(Direction.y) > 0 ? floor(RayMarchPos.y) + 1 : ceil(RayMarchPos.y) - 1;
+		VoxelBoundsPos.z = sign(Direction.z) > 0 ? floor(RayMarchPos.z) + 1 : ceil(RayMarchPos.z) - 1;
+
+		BoundsHitT = (VoxelBoundsPos - RayMarchPos) * InvDirection;
+
+		// Remove floating-point rounding error
+		float Epsilon = 1.0e-4;
+		if (BoundsHitT.x <= Epsilon)
+			BoundsHitT.x += abs(InvDirection.x);
+		if (BoundsHitT.y <= Epsilon)
+			BoundsHitT.y += abs(InvDirection.y);
+		if (BoundsHitT.z <= Epsilon)
+			BoundsHitT.z += abs(InvDirection.z);
+
+		DeltaT = 0.0f;
+	}
+
+	bool Next()
+	{
+		RayMarchT += DeltaT;
+		RayMarchPos += DeltaT * Direction;
+
+		if (RayMarchT >= TMax)
+		{
+			// DDA has completed
+			return false;
+		}
+
+		if (BoundsHitT.x < BoundsHitT.y)
+		{
+			if (BoundsHitT.x < BoundsHitT.z)
+			{
+				DeltaT = BoundsHitT.x - RayMarchT;
+				BoundsHitT.x += abs(InvDirection.x);
+			}
+			else
+			{
+				DeltaT = BoundsHitT.z - RayMarchT;
+				BoundsHitT.z += abs(InvDirection.z);
+			}
+		}
+		else
+		{
+			if (BoundsHitT.y < BoundsHitT.z)
+			{
+				DeltaT = BoundsHitT.y - RayMarchT;
+				BoundsHitT.y += abs(InvDirection.y);
+			}
+			else
+			{
+				DeltaT = BoundsHitT.z - RayMarchT;
+				BoundsHitT.z += abs(InvDirection.z);
+			}
+		}
+		
+		// Clip voxel delta-t by overall voxel ray-length.
+		if (RayMarchT + DeltaT > TMax)
+		{
+			DeltaT = TMax - RayMarchT;
+		}
+
+		return true;
+	}
+
+	float3 GetVoxelEntry()
+	{
+		return RayMarchPos;
+	}
+
+	float3 GetVoxelExit()
+	{
+		return RayMarchPos + DeltaT * Direction;
+	}
+
+	float3 GetVoxelMidpoint()
+	{
+		return (GetVoxelEntry() + GetVoxelExit()) * 0.5f;
+	}
+
+	float GetWorldDeltaT()
+	{
+		return DeltaT * DistanceScale;
+	}
+
+	float GetDistanceScale()
+	{
+		return DistanceScale;
+	}
+};
+
+
+FHVPT_GridIterator HVPT_CreateTopLevelIterator(float3 Origin, float3 Direction, float TMin, float TMax)
+{
+	// Initialize DDA state
+	float3 WorldRayBegin = Origin + Direction * TMin;
+	float3 WorldRayEnd = Origin + Direction * TMax;
+	float WorldRayTMax = length(WorldRayEnd - WorldRayBegin);
+
+	// Transform to voxel-space
+	float3 WorldBoundsMin = HVPT_GetTranslatedWorldPos(HVPT_OrthoGrid.TopLevelGridWorldBoundsMin);
+	float3 WorldBoundsMax = HVPT_GetTranslatedWorldPos(HVPT_OrthoGrid.TopLevelGridWorldBoundsMax);
+	float3 TopLevelGridWorldBoundsExtent = WorldBoundsMax - WorldBoundsMin;
+	float3 VoxelRayBegin = (WorldRayBegin - WorldBoundsMin) / TopLevelGridWorldBoundsExtent * HVPT_OrthoGrid.TopLevelGridResolution;
+	float3 VoxelRayEnd = (WorldRayEnd - WorldBoundsMin) / TopLevelGridWorldBoundsExtent * HVPT_OrthoGrid.TopLevelGridResolution;
+
+	FHVPT_GridIterator Iterator = (FHVPT_GridIterator)0;
+	Iterator.Init(VoxelRayBegin, VoxelRayEnd, WorldRayTMax);
+	return Iterator;
+}
+
+FHVPT_GridIterator HVPT_CreateBottomLevelIterator(float3 TopLevelVoxelEntry, float3 TopLevelVoxelExit, float TopLevelVoxelToWorldScale, uint3 BottomLevelVoxelResolution)
+{
+	// TODO: I believe there is some issue in this function to be diagnosed.
+	float3 BottomLevelRayBegin = frac(TopLevelVoxelEntry) * BottomLevelVoxelResolution;
+	float3 BottomLevelRayEnd = frac(TopLevelVoxelExit) * BottomLevelVoxelResolution;
+
+	FHVPT_GridIterator Iterator = (FHVPT_GridIterator)0;
+	Iterator.Init(BottomLevelRayBegin, BottomLevelRayEnd, length(TopLevelVoxelExit - TopLevelVoxelEntry) * TopLevelVoxelToWorldScale);
+	return Iterator;
+}
+
+
+uint HVPT_GetTopLevelLinearIndex(FHVPT_GridIterator Iterator)
+{
+	return GetLinearIndex(Iterator.GetVoxelMidpoint(), HVPT_OrthoGrid.TopLevelGridResolution);
+}
+
+uint HVPT_GetBottomLevelLinearIndex(FHVPT_GridIterator Iterator, uint BottomLevelIndex)
+{
+	return BottomLevelIndex + MortonEncode3(Iterator.GetVoxelMidpoint());
+}
+
+
+#endif

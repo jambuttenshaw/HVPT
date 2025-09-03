@@ -1,0 +1,36 @@
+#include "/Engine/Private/Common.ush"
+
+#ifndef THREADGROUP_SIZE_2D
+#define THREADGROUP_SIZE_2D 1
+#endif // THREADGROUP_SIZE_2D
+
+
+// The number of samples that are accumulated in the history so far, so the new radiance texture's contribution can be correctly weighted
+int NumAccumulatedSamples;
+
+RWTexture2D<float4> RWTemporalAccumulationTexture;
+RWTexture2D<float3> RWRadianceTexture;
+RWTexture2D<float2> RWFeatureTexture;
+
+
+[numthreads(THREADGROUP_SIZE_2D, THREADGROUP_SIZE_2D, 1)]
+void HVPT_AccumulateCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	int2 PixelCoord = DispatchThreadId.xy;
+
+	if (any(PixelCoord >= View.ViewSizeAndInvSize.xy))
+	{
+		return;
+	}
+
+	float3 CurrentRadiance = RWRadianceTexture[PixelCoord];
+	float2 CurrentFeature = RWFeatureTexture[PixelCoord];
+	float4 CurrentVal = float4(CurrentRadiance, CurrentFeature.x);
+
+	float4 Sum = RWTemporalAccumulationTexture[PixelCoord] + CurrentVal;
+	float4 Output = Sum / (NumAccumulatedSamples + 1);
+
+	RWTemporalAccumulationTexture[PixelCoord] = Sum;
+	RWRadianceTexture[PixelCoord] = Output.xyz;
+	RWFeatureTexture[PixelCoord] = float2(Output.w, CurrentFeature.y);
+}

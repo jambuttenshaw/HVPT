@@ -1,0 +1,464 @@
+#ifndef TRACKINGUTILS_H
+#define TRACKINGUTILS_H
+
+#include "/Engine/Private/RayTracing/RayTracingCommon.ush"
+
+#include "/Engine/Private/PathTracing/Utilities/PathTracingRandomSequence.ush"
+#include "/Engine/Private/PathTracing/Volume/PathTracingVolumeCommon.ush"
+
+#include "DDAUtils.ush"
+#include "../VoxelGrid/VoxelGridUtils.ush"
+
+//
+// --- HETEROGENEOUS VOLUME SAMPLING METHODS
+//
+
+struct FHVPT_MajorantSample
+{
+	float Distance; // The parametric T value of where the sample occurred
+
+	float3 SigmaMaj; // The majorant at the sample location
+	float3 MajorantTransmittance;
+
+	// TODO: Also include PDF in the sample (will allow for underlying calculation of PDF to be abstracted, e.g. if moving to chromatic sampling)
+
+	bool IsValid()
+	{
+		// TODO: Is a T of 0 possible / desirable?
+		return Distance >= 0.0f;
+	}
+};
+
+
+struct FHVPT_MajorantSamplingContext
+{
+	// Contains the state for iterating through voxels along the ray using DDA
+	FHVPT_GridIterator Iterator;
+
+	float RayOriginToSegmentDistance; // Distance from RAY ORIGIN to the beginning of the current segment
+	float CurrentSegmentT; // Distance from where the ray enters the current segment to the last sample point
+	float3 SigmaMaj; // Majorant of the current segment
+	float3 MajorantTransmittance; // Accumulated transmittance since LAST SAMPLE WAS TAKEN
+	bool bDone; // Set when the ray exits the volume
+
+	RandomSequence RandSequence;
+
+	void Init(float3 InWorldRayOrigin,
+		float3 InWorldRayDirection,
+		float InVolumeTMin,
+		float InVolumeTMax,
+		float2 RandSample)
+	{
+		// Set up DDA
+		Iterator = HVPT_CreateTopLevelIterator(
+			InWorldRayOrigin,
+			InWorldRayDirection,
+			InVolumeTMin,
+			InVolumeTMax
+		);
+
+		RayOriginToSegmentDistance = InVolumeTMin;
+
+		CurrentSegmentT = 0.0f; // SegmentWorldTMax should be 0 before DDA.Next() is called
+		SigmaMaj = 0.0f;
+		MajorantTransmittance = 1.0f;
+		bDone = false;
+
+		RandSequence.SampleIndex = asuint(RandSample.x);
+		RandSequence.SampleSeed = asuint(RandSample.y);
+	}
+
+	// Draw a new sample from the majorant grid
+	// Advances DDA if sample exceeds current majorant segment
+	FHVPT_MajorantSample Sample()
+	{
+		FHVPT_MajorantSample Sample = (FHVPT_MajorantSample)0;
+
+		// No new samples can ever be drawn as the ray reached the end of its bounds
+		if (bDone)
+		{
+			Sample.Distance = -1;
+			return Sample;
+		}
+
+		// TODO: For reasons I do not understand, in some cases this loop never terminates.
+		// TODO: DDA Terminates correctly in RayMarchingTransmittance, so the error must be with the condition guarding Iterator.Next()
+		int LoopGuard = 0;
+		const int MaxSteps = 512;
+		while (LoopGuard++ < MaxSteps)
+		{
+			// Progress to next segment if required
+			if (CurrentSegmentT >= Iterator.GetWorldDeltaT())
+			{
+				bool bIsNextSegment = Iterator.Next();
+				// Get new majorant
+				// Majorant should never be less than 0 (and only equal to 0 in areas of empty space)
+				SigmaMaj = max(GetMajorantData(HVPT_OrthoGrid.MajorantGridBuffer[HVPT_GetTopLevelLinearIndex(Iterator)]).Majorant, 0.0f);
+
+				if (!bIsNextSegment)
+				{
+					// There is not another segment to be processed by DDA so we cannot draw a sample EVER AGAIN
+					bDone = true;
+					// NOTE: Callers need to know the transmittance between the last sample and exiting the volume.
+					// This will be stored in MajorantTransmittance when bDone is set to true
+					Sample.Distance = -1;
+					return Sample;
+				}
+
+				if (SigmaMaj.x == 0.0f)
+				{
+					// Zero-valued majorant means empty space - all coefficients are 0
+
+					// Transmittance must still be accumulated (in case y/z components are not 0)
+					MajorantTransmittance *= exp(-Iterator.GetWorldDeltaT() * SigmaMaj);
+
+					// Advance to end of segment
+					RayOriginToSegmentDistance += Iterator.GetWorldDeltaT();
+					CurrentSegmentT = Iterator.GetWorldDeltaT();
+					continue;
+				}
+
+				// Move to the beginning of the segment
+				CurrentSegmentT = 0.0f;
+			}
+		
+			// Sample current segment
+
+			float u = RandomSequence_GenerateSample1D(RandSequence);
+			// Draw sample from exponential PDF proportional to majorant transmission
+			float SampleExponential = -log(1.0f - u) / SigmaMaj.x;
+
+			// Get sample T position	
+			float SampleDistance = CurrentSegmentT + SampleExponential;
+
+			if (SampleDistance < Iterator.GetWorldDeltaT())
+			{
+				// We remained within segment, can use this as a sample location
+				// Update transmittance to this location
+				MajorantTransmittance *= exp(-SampleExponential * SigmaMaj);
+
+				CurrentSegmentT = SampleDistance;
+				break;
+			}
+			else // Sampled distance exceeds current segment
+			{
+				// Update transmittance and try to proceed to next segment
+				// This is the transmittance from TMin to the end of the majorant segment
+				float dt = Iterator.GetWorldDeltaT() - CurrentSegmentT;
+				MajorantTransmittance *= exp(-dt * SigmaMaj);
+
+				// DDA.Next() will be called on the next iteration of the loop
+				RayOriginToSegmentDistance += Iterator.GetWorldDeltaT();
+				CurrentSegmentT = Iterator.GetWorldDeltaT(); // Signals DDA to advance - Will get reset after DDA advances
+			}
+		}
+
+		Sample.Distance = RayOriginToSegmentDistance + CurrentSegmentT;
+		Sample.SigmaMaj = SigmaMaj;
+		Sample.MajorantTransmittance = MajorantTransmittance;
+
+		// Sample has been taken: reset transmittance
+		MajorantTransmittance = 1.0f;
+
+		return Sample;
+	}
+};
+
+
+//
+// --- TRACKING / TRANSMITTANCE METHODS
+//
+
+struct FHVPT_TrackingResult
+{
+	float Distance;
+	float3 Transmittance; // TODO: float or float3?
+
+	// Properties at sampling point
+	float3 SigmaT;
+	float3 SigmaS;
+	float3 Emission;
+	float PhaseG;
+};
+
+FHVPT_TrackingResult HVPT_CreateTrackingResult()
+{
+	FHVPT_TrackingResult Result = (FHVPT_TrackingResult)0;
+	Result.Distance = POSITIVE_INFINITY;
+	Result.Transmittance = 1.0f;
+	return Result;
+}
+
+
+FHVPT_TrackingResult HVPT_DeltaTracking(FRayDesc Ray, inout RandomSequence RandSequence)
+{
+	FHVPT_MajorantSamplingContext SamplingContext;
+	SamplingContext.Init(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RandomSequence_GenerateSample2D(RandSequence));
+
+	FHVPT_TrackingResult Result = HVPT_CreateTrackingResult();
+
+	// Use delta tracking to sample the volume
+	while (true)
+	{
+		FHVPT_MajorantSample Sample = SamplingContext.Sample();
+		if (!Sample.IsValid())
+		{
+			break;
+		}
+
+		// Get volume properties at point
+		float3 WorldPosition = Ray.Origin + Sample.Distance * Ray.Direction;
+		FVolumeShadedResult Properties = HVPT_GetDensity(WorldPosition);
+		Properties.SigmaT = min(Sample.SigmaMaj, Properties.SigmaT);
+
+		// Determine if this is a null sample
+		float3 NullProbability = max(0.0f, 1.0f - Properties.SigmaT / Sample.SigmaMaj);
+		float RandValue = RandomSequence_GenerateSample1D(RandSequence);
+		if (RandValue < max3(NullProbability.x, NullProbability.y, NullProbability.z))
+		{
+		}
+		else
+		{
+			// Hit a real sample
+			Result.Distance = Sample.Distance;
+
+			Result.SigmaT = Properties.SigmaT;
+			Result.SigmaS = Properties.SigmaSHG;
+			Result.Emission = Properties.Emission;
+			Result.PhaseG = Properties.PhaseG;
+
+			break;
+		}
+	}
+
+	return Result;
+}
+
+/*
+// Ratio tracking only gives the transmittance between two points
+float3 HVPT_RatioTracking(FRayDesc Ray, inout RandomSequence RandSequence)
+{
+	float3 Transmittance = 1.0f;
+
+	FHVPT_MajorantSamplingContext SamplingContext;
+	SamplingContext.Init(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RandomSequence_GenerateSample2D(RandSequence));
+	
+	while (true)
+	{
+		FHVPT_MajorantSample Sample = SamplingContext.Sample();
+		if (!Sample.IsValid())
+		{
+			break;
+		}
+
+		// Get volume properties at point
+		float3 WorldPosition = Ray.Origin + Sample.Distance * Ray.Direction;
+		FVolumeShadedResult Properties = HVPT_GetDensity(WorldPosition);
+
+		Properties.SigmaT = min(Sample.SigmaMaj, Properties.SigmaT);
+		// Doing 1 - A/B gives negative values due to floating point rounding
+		// Doing (B - A)/B instead avoids this issue
+		Transmittance *= (Sample.SigmaMaj - Properties.SigmaT) / Sample.SigmaMaj;
+
+		if (!any(Transmittance > 0))
+		{
+			break;
+		}
+	}
+
+	return Transmittance;
+}
+
+float3 HVPT_RatioTracking_Majorant(FRayDesc Ray, inout RandomSequence RandSequence)
+{
+	float3 Transmittance = 1.0f;
+
+	FHVPT_MajorantSamplingContext SamplingContext;
+	SamplingContext.Init(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RandomSequence_GenerateSample2D(RandSequence));
+	
+	while (true)
+	{
+		FHVPT_MajorantSample Sample = SamplingContext.Sample();
+		if (!Sample.IsValid())
+		{
+			break;
+		}
+
+		// Get volume properties at point
+		float3 WorldPosition = Ray.Origin + Sample.Distance * Ray.Direction;
+		FVolumeShadedResult Properties = HVPT_GetDensity(WorldPosition);
+
+		Properties.SigmaT = min(Sample.SigmaMaj, Properties.SigmaT);
+		Transmittance *= Sample.MajorantTransmittance;
+
+		// TODO: Work out why the ratio tracking estimator from production volume rendering doesn't work.
+		// TODO: It was even producing negative values in some cases (before the clamping)
+		// TODO: Does production volume rendering assume this estimator is with respect to a global majorant?
+		//Transmittance *= max(0, 1.0f - Properties.SigmaT / Sample.SigmaMaj);
+
+		if (!any(Transmittance > 0))
+		{
+			break;
+		}
+	}
+
+	return Transmittance;
+}
+*/
+
+struct FHVPT_RayMarchingResult
+{
+	float3 Transmittance;
+	float Distance_Sample;				// Either: distance at which transmittance reaches zero OR a distance sample along the ray if transmittance never reaches 0
+	float Distance_InitialInteraction;	// Distance of the first scattering event along the ray
+	bool bEscaped;
+};
+
+FHVPT_RayMarchingResult HVPT_CreateRayMarchingResult()
+{
+	FHVPT_RayMarchingResult Result = (FHVPT_RayMarchingResult) 0;
+	Result.Transmittance = 1.0f;
+	Result.Distance_Sample = POSITIVE_INFINITY;
+	Result.Distance_InitialInteraction = POSITIVE_INFINITY;
+	Result.bEscaped = false;
+	return Result;
+}
+
+// Returns the transmittance in the XYZ channels and a distance sample in W
+// If the transmittance reaches 0, then the distance sample will always be the point at which the ray extinguished.
+// If ray escaped the volume, then the distance sample will be POSITIVE_INFINITY if bWRSDistance is false,
+// otherwise if bWRSDistance is true then a distance sample will be selected proportionally to the densities at each point visited along the ray
+// bRecordInitialInteraction will store the distance at which the optical depth first exceeded InitialInteraction_OpticalDepthThreshold
+template<bool bWRSDistance = false, bool bRecordInitialInteraction = false>
+FHVPT_RayMarchingResult HVPT_RayMarchingTransmittance(FRayDesc Ray, float DeltaT, inout RandomSequence RandSequence, float InitialInteraction_OpticalDepthThreshold = 1.0f)
+{
+	FHVPT_RayMarchingResult Result = HVPT_CreateRayMarchingResult();
+
+	// For stochastically selecting a depth sample in the case that the ray is not fully extinguished
+	// Only used when bWRSDistance is true
+	float WeightSum = 0.0f;
+
+	float3 OpticalDepth = 0.0f;
+	bool bDone = false;
+
+	FHVPT_GridIterator TopLevelIterator = HVPT_CreateTopLevelIterator(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
+	float CurrentT = Ray.TMin;
+
+	// TODO: This loop guard appears to be required due to black magic
+	// TODO: No thread ever hits 512 iterations in practice, but removing the loop guard causes TDR when the loop contents are not trivial
+	uint LoopGuard = 0;
+	const uint MaxSteps = 512;
+	while (++LoopGuard < MaxSteps && !bDone)
+	{
+		bool bIsNextTopLevelSegment = TopLevelIterator.Next();
+		if (!bIsNextTopLevelSegment)
+		{
+			break;
+		}
+
+		FHVPT_TopLevelGridData TopLevelData = HVPT_OrthoGrid.TopLevelGridBuffer[HVPT_GetTopLevelLinearIndex(TopLevelIterator)];
+		if (IsBottomLevelAllocated(TopLevelData))
+		{
+			float T = 0.0f;
+			while (T < TopLevelIterator.GetWorldDeltaT() && !bDone)
+			{
+				float3 WorldPos = Ray.Origin + (CurrentT + T) * Ray.Direction;
+				// TODO: A custom lookup function could use the existing ortho grid top level data in case not in frustum,
+				// TODO: since we have already retrieved that data
+				FVolumeShadedResult Properties = HVPT_GetDensity(WorldPos);
+
+				// Accumulate optical depth instead of transmittance to save on exponential evaluations
+				OpticalDepth += Properties.SigmaT * DeltaT;
+
+				if (bRecordInitialInteraction && Result.Distance_InitialInteraction == POSITIVE_INFINITY && any(OpticalDepth > InitialInteraction_OpticalDepthThreshold))
+				{
+					Result.Distance_InitialInteraction = CurrentT + T;
+				}
+
+				// Terminate when transmittance is less than 1e-4
+				// -log(1e-4) ~= 9.2
+				if (all(OpticalDepth > 9.2f)) 
+				{
+					bDone = true;
+					Result.Distance_Sample = CurrentT + T;
+				}
+				else if (bWRSDistance)
+				{
+					float w = max3(Properties.SigmaT.x, Properties.SigmaT.y, Properties.SigmaT.z);
+					WeightSum += w;
+					if (RandomSequence_GenerateSample1D(RandSequence) < w / WeightSum)
+					{
+						Result.Distance_Sample = CurrentT + T;
+					}
+				}
+
+				T += DeltaT;
+			}
+		}
+
+		CurrentT += TopLevelIterator.GetWorldDeltaT();
+	}
+
+	Result.Transmittance = bDone ? 0.0f : exp(-OpticalDepth);
+	Result.bEscaped = !(bDone || LoopGuard >= MaxSteps);
+
+	return Result;
+}
+
+// TODO: DDA Transmittance doesn't work yet
+// DDA through the bottom level grid produces significant artefacts
+/*
+float3 HVPT_DDATransmittance(FRayDesc Ray)
+{
+	float3 Transmittance = 1.0f;
+
+	FHVPT_GridIterator TopLevelIterator = HVPT_CreateTopLevelIterator(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
+
+	// TODO: This loop guard appears to be required due to black magic
+	// TODO: No thread ever hits 512 iterations in practice, but removing the loop guard causes TDR when the loop contents are not trivial
+	uint LoopGuard = 0;
+	const uint MaxSteps = 512;
+	while (LoopGuard++ < MaxSteps)
+	{
+		bool bIsNextTopLevelSegment = TopLevelIterator.Next();
+		if (!bIsNextTopLevelSegment)
+		{
+			break;
+		}
+
+		FHVPT_TopLevelGridData TopLevelData = HVPT_OrthoGrid.TopLevelGridBuffer[HVPT_GetTopLevelLinearIndex(TopLevelIterator)];
+		if (IsBottomLevelAllocated(TopLevelData))
+		{
+			FHVPT_GridIterator BottomLevelIterator = HVPT_CreateBottomLevelIterator(
+				TopLevelIterator.GetVoxelEntry(), TopLevelIterator.GetVoxelExit(), TopLevelIterator.GetDistanceScale(), GetBottomLevelVoxelResolution(TopLevelData)
+			);
+			uint BottomLevelIndex = GetBottomLevelIndex(TopLevelData);
+
+			uint LoopGuard = 0;
+			while (LoopGuard++ < MaxSteps)
+			{
+				bool bIsNextBottomLevelSegment = BottomLevelIterator.Next();
+				if (!bIsNextBottomLevelSegment)
+				{
+					//Debug = StepCount;
+					break;
+				}
+
+				// Get distance travelled through bottom level voxel in world space
+				float DeltaT = BottomLevelIterator.GetWorldDeltaT();
+
+				// Get properties
+				uint LinearBottomLevelVoxelPos = HVPT_GetBottomLevelLinearIndex(BottomLevelIterator, BottomLevelIndex);
+				float3 SigmaT = GetExtinction(HVPT_OrthoGrid.ExtinctionGridBuffer[LinearBottomLevelVoxelPos]);
+
+				// Accumulate optical depth
+				Transmittance *= exp(-SigmaT * DeltaT);
+			}
+		}
+	}
+
+	return Transmittance;
+}
+*/
+
+#endif

@@ -1,0 +1,67 @@
+
+// This needs to be first for generated uniform buffer ush to compile
+#include "../VoxelGrid/VoxelGridTypes.ush"
+
+#include "/Engine/Private/Common.ush"
+#include "../../Shared/HVPTDefinitions.h"
+
+#include "ReSTIRUtils.ush"
+
+#ifndef MULTIPLE_BOUNCES
+#define MULTIPLE_BOUNCES true
+#endif
+
+uint TemporalSeed;
+
+StructuredBuffer<FHVPT_Reservoir> CurrentReservoirs;
+StructuredBuffer<FHVPT_Bounce> ExtraBounces;
+
+RWTexture2D<float3> RWRadianceTexture;
+
+
+RAY_TRACING_ENTRY_RAYGEN(ReSTIRFinalShadingRGS)
+{
+	uint2 PixelCoord = DispatchRaysIndex().xy;
+
+	float3 Radiance = 0.0f;
+
+	uint LinearPixelIndex = HVPT_GetReservoirIndex(PixelCoord);
+	FHVPT_Reservoir Reservoir = CurrentReservoirs[LinearPixelIndex];
+
+	if (Reservoir.RunningSum > 0.0f)
+	{
+		FRayDesc Ray = HVPT_CreateRayDesc(PixelCoord);
+		Ray.TMax = Reservoir.Depth;
+
+		// Ray must be bounded by the HV AABB for tracking to work correctly
+		FVolumeIntersection VolIntersect = HVPT_Intersect(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
+		Ray.TMin = VolIntersect.VolumeTMin;
+		Ray.TMax = VolIntersect.VolumeTMax;
+		// If RunningSum > 0, then this ray MUST have intersected with the volume AABB.
+
+		RandomSequence RandSequence = (RandomSequence)0;
+		RandomSequence_Initialize(RandSequence, LinearPixelIndex, TemporalSeed);
+
+		// Load extra bounces
+#if MULTIPLE_BOUNCES
+		FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES];
+		uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(PixelCoord, 0);
+		for (uint i = 0; i < Reservoir.NumExtraBounces; i++)
+		{
+			Bounces[i] = ExtraBounces[ExtraBounceIndex + i];
+		}
+#endif
+
+		Radiance = HVPT_EvaluateF<true>(Reservoir,
+#if MULTIPLE_BOUNCES
+			Bounces,
+#endif
+			Ray, RandSequence);
+
+		float W = Reservoir.P_y == 0.0 ? 1.f : Reservoir.RunningSum / (Reservoir.P_y * Reservoir.M);
+		Radiance *= W;
+	}
+
+	// Transmittance is calculated separately
+	RWRadianceTexture[PixelCoord].xyz = Radiance * View.PreExposure;
+}

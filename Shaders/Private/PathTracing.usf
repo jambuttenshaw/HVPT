@@ -1,0 +1,406 @@
+
+#include "VoxelGrid/VoxelGridTypes.ush"
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/RayTracing/RayTracingCommon.ush"
+#include "/Engine/Private/PathTracing/PathTracingCommon.ush"
+#include "/Engine/Private/PathTracing/Material/PathTracingMaterialSampling.ush"
+#include "/Engine/Private/PathTracing/Volume/PathTracingFog.ush"
+
+#include "Utils/PathTracingUtils.ush"
+#include "Utils/TrackingUtils.ush"
+
+
+#ifndef USE_SURFACE_CONTRIBUTIONS
+#define USE_SURFACE_CONTRIBUTIONS true
+#endif
+
+#ifndef APPLY_VOLUMETRIC_FOG
+#define APPLY_VOLUMETRIC_FOG true
+#endif
+
+
+RaytracingAccelerationStructure TLAS;
+
+// Uses a copy of the scene depth, that was made before writing HVPT into it
+Texture2D<float> SceneDepthTexture_Copy;
+
+// Random init parameters
+uint TemporalSeed;
+
+// Tracing Parameters
+uint MaxBounces;
+uint MaxRaymarchSteps;
+
+RWTexture2D<float3> RWRadianceTexture;
+
+
+struct FHVPT_PathState
+{
+	RandomSequence RandSequence;
+	FRayDesc Ray;
+
+	float3 PathThroughput;
+	float3 Radiance;
+};
+
+
+FHVPT_PathState HVPT_CreatePathState(uint2 PixelIndex)
+{
+	FHVPT_PathState PathState = (FHVPT_PathState)0;
+
+	// Assumes 1spp
+	uint LinearPixelIndex = PixelIndex.y * View.ViewSizeAndInvSize.x + PixelIndex.x;
+	RandomSequence_Initialize(PathState.RandSequence, LinearPixelIndex, TemporalSeed);
+
+	// Create ray properties
+	float DeviceZ = SceneDepthTexture_Copy.Load(uint3(PixelIndex, 0)).r;
+	PathState.Ray = HVPT_CreateRayDesc<true>(PixelIndex, DeviceZ);
+
+	PathState.PathThroughput = 1.0f;
+	PathState.Radiance = 0.0f;
+
+	return PathState;
+}
+
+
+// Trace one ray - this will calculate an intersection for a single bounce
+FPathTracingPayload HVPT_TraceRay(FRayDesc Ray, bool bIsCameraRay, out FVolumeIntersection VolumeIntersect)
+{
+	FPathTracingPayload Payload = (FPathTracingPayload) 0;
+
+	// First trace against the scene. This gives a bound on the TMax used to intersect volumes
+	// TODO: On the first bounce, I have the TMax from depth buffer and I don't want to bounce off of the scene
+	if (!bIsCameraRay)
+	{
+		FRayCone RayCone = (FRayCone) 0;
+		FMaterialClosestHitPayload MaterialPayload = TraceMaterialRay(
+				TLAS,
+				0,
+				PATHTRACER_MASK_ALL,
+				Ray,
+				RayCone,
+				false,
+				true,
+				bIsCameraRay
+			);
+		Payload = HVPT_CreateSurfaceHitPayload(MaterialPayload);
+
+		// Only intersect volumes until the nearest surface
+		if (Payload.IsHit())
+		{
+			Ray.TMax = Payload.HitT;
+		}
+	}
+	else
+	{
+		Payload.HitT = -1;
+	}
+
+	// Now intersect against the volume
+	VolumeIntersect = HVPT_Intersect(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
+
+	return Payload;
+}
+
+
+float3 HVPT_TraceVisibilityRay(FRayDesc RayDesc, inout RandomSequence RandSequence)
+{
+	float3 Throughput = 1.0f;
+
+	// First try opaque surfaces
+	FMinimalPayload Payload = TraceVisibilityRay(
+		TLAS,
+		RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+		PATHTRACER_MASK_SHADOW,
+		RayDesc);
+
+	if (Payload.IsHit())
+	{
+		return 0.0f;
+	}
+
+	// Then perform volume tracking
+	FVolumeIntersection Intersection = HVPT_Intersect(RayDesc.Origin, RayDesc.Direction, RayDesc.TMin, RayDesc.TMax);
+	bool bEscaped = false;
+	if (Intersection.HitVolume())
+	{
+		FHVPT_MajorantSamplingContext SamplingContext = (FHVPT_MajorantSamplingContext)0;
+		SamplingContext.Init(
+			RayDesc.Origin, RayDesc.Direction, Intersection.VolumeTMin, Intersection.VolumeTMax,
+			RandomSequence_GenerateSample2D(RandSequence)
+		);
+		uint LoopGuard = 0;
+		while (LoopGuard++ < 128) // Until the ray escapes or there is no energy left in the path
+		{
+			// Acquire a new sample from the volume
+			FHVPT_MajorantSample Sample = SamplingContext.Sample();
+			if (!Sample.IsValid())
+			{
+				// Escaped the volume
+				bEscaped = true;
+				break;
+			}
+
+			float3 WorldPosition = RayDesc.Origin + Sample.Distance * RayDesc.Direction;
+			FVolumeShadedResult Result = HVPT_GetDensity(WorldPosition);
+
+			float3 Sigma_n = max(Sample.SigmaMaj - Result.SigmaT, 0.0f);
+			float PDF = Sample.MajorantTransmittance.x * Sample.SigmaMaj.x;
+			// TODO: Added 'saturate' is a bit of a hack, but it stopped NaN's appearing when this function was called from HVPT_DirectLight_Surface
+			Throughput *= saturate(Sample.MajorantTransmittance * Sigma_n / PDF);
+
+			// Perform russian roulette
+			if (max3(Throughput.x, Throughput.y, Throughput.z) < 0.05f)
+			{
+				float q = 0.75f;
+				if (RandomSequence_GenerateSample1D(RandSequence) < q)
+				{
+					Throughput = 0.0f;
+				}
+				else
+				{
+					Throughput /= 1.0f - q;
+				}
+			}
+
+			// Exit once throughput reaches 0
+			if (!any(Throughput > 0))
+			{
+				break;
+			}
+		}
+		// Accumulate throughput from last sample point to exiting the volume
+		Throughput *= SamplingContext.MajorantTransmittance;
+
+#if APPLY_VOLUMETRIC_FOG
+		if (bEscaped)
+		{
+			// Accumulate transmittance due to global fog from exit point
+			RayDesc.TMin = Intersection.VolumeTMax;
+			Throughput *= saturate(FogGetTransmittance(RayDesc.Origin, RayDesc.Direction, RayDesc.TMin, RayDesc.TMax));
+		}
+#endif
+	}
+
+	return Throughput;
+}
+
+float3 HVPT_DirectLight_Medium(float PhaseG, float3 TranslatedWorldPos, float3 RayDirection, inout RandomSequence RandSequence)
+{
+	// Select a light source to sample
+	uint LightId = -1;
+	FLightSample LightSample = HVPT_SampleLight(TranslatedWorldPos, 0.0f, RandomSequence_GenerateSample3D(RandSequence), LightId);
+	if (LightSample.Pdf <= 0)
+	{
+		return 0;
+	}
+
+	// Evaluate material at that point
+	float MaterialPDF = HenyeyGreensteinPhase(PhaseG, dot(-RayDirection, LightSample.Direction));
+	if (MaterialPDF <= 0)
+	{
+		return 0;
+	}
+
+	// Calculate ray from shading point to light source
+	FRayDesc LightRay;
+	LightRay.Origin = TranslatedWorldPos;
+	LightRay.Direction = LightSample.Direction;
+	LightRay.TMin = 0.0f;
+	LightRay.TMax = LightSample.Distance;
+
+	float3 Visibility = HVPT_TraceVisibilityRay(LightRay, RandSequence);
+
+	// Return path contribution from direct light
+	return MaterialPDF * LightSample.RadianceOverPdf * Visibility;
+}
+
+float3 HVPT_DirectLight_Surface(FPathTracingPayload SurfacePayload, float3 RayDirection, inout RandomSequence RandSequence)
+{
+	// Select a light source to sample
+	uint LightId = -1;
+	FLightSample LightSample = HVPT_SampleLight(SurfacePayload.TranslatedWorldPos, SurfacePayload.WorldNormal, RandomSequence_GenerateSample3D(RandSequence), LightId);
+	if (LightSample.Pdf <= 0)
+	{
+		return 0;
+	}
+
+	// Evaluate material at that point
+	FMaterialEval MaterialEval = EvalMaterial(-RayDirection, LightSample.Direction, SurfacePayload, float2(1.0f, 0.0f));
+	if (MaterialEval.Pdf <= 0)
+	{
+		return 0;
+	}
+
+	// Calculate ray from shading point to light source
+	FRayDesc LightRay;
+	LightRay.Origin = SurfacePayload.TranslatedWorldPos + 0.001f * SurfacePayload.WorldNormal;
+	LightRay.Direction = LightSample.Direction;
+	LightRay.TMin = 0.0f;
+	LightRay.TMax = LightSample.Distance;
+
+	float3 Visibility = HVPT_TraceVisibilityRay(LightRay, RandSequence);
+
+	// Return path contribution from direct light
+	return (MaterialEval.Weight * MaterialEval.Pdf) * LightSample.RadianceOverPdf * Visibility;
+}
+
+
+// Helper function for brevity
+float Max(float3 x)
+{
+	return max3(x.x, x.y, x.z);
+}
+
+
+bool HVPT_PathTracingKernel(inout FHVPT_PathState PathState, int Bounce)
+{
+	bool bIsCameraRay = Bounce == 0;
+	bool bLastBounce = Bounce == (MaxBounces - 1);
+
+	// Intersect with scene
+	FVolumeIntersection VolumeIntersection;
+	FPathTracingPayload SurfacePayload = HVPT_TraceRay(PathState.Ray, bIsCameraRay, VolumeIntersection);
+
+	if (VolumeIntersection.HitVolume())
+	{
+		bool bScattered = false;
+		bool bTerminated = false;
+
+		// Sample points through the volume until the ray is either absorbed, scattered, or exits through the volume
+
+		// This uses DDA to advance through the voxel grid and uses the majorant to sample from an exponential distribution
+		FHVPT_MajorantSamplingContext SamplingContext;
+		SamplingContext.Init(
+			PathState.Ray.Origin, PathState.Ray.Direction, VolumeIntersection.VolumeTMin, VolumeIntersection.VolumeTMax,
+			RandomSequence_GenerateSample2D(PathState.RandSequence)
+		);
+		uint LoopGuard = 0;
+		while (LoopGuard++ < 256)
+		{
+			// Get next sample
+			FHVPT_MajorantSample Sample = SamplingContext.Sample();
+			if (Sample.IsValid())
+			{
+				// Get volume properties at point
+				float3 WorldPosition = PathState.Ray.Origin + Sample.Distance * PathState.Ray.Direction;
+				FVolumeShadedResult Result = HVPT_GetDensity(WorldPosition);
+
+				// Ensure that sigmaT is never above the majorant - this creates all sorts of weirdness
+				Result.SigmaT = min(Sample.SigmaMaj, Result.SigmaT);
+
+				float3 SigmaA = Result.SigmaT - Result.SigmaSHG;
+				float3 Albedo = saturate(Result.SigmaSHG / Result.SigmaT);
+
+				// Accumulate emission
+				if (any(Result.Emission > 0.0f))
+				{
+					PathState.Radiance += PathState.PathThroughput * /*(1.0f - Albedo) * */Result.Emission;
+				}
+
+				// Decide on scattering type
+				float AbsorptionProbability = Max(SigmaA) / Max(Sample.SigmaMaj);
+				float ScatteringProbability = Max(Result.SigmaSHG) / Max(Sample.SigmaMaj);
+				float NullProbability = max(0.0f, 1.0f - AbsorptionProbability - ScatteringProbability);
+
+				// Rescale probabilities to be (0,1]
+				float ProbabilitiesSum = AbsorptionProbability + ScatteringProbability + NullProbability;
+				float Absorption_CMF = saturate(AbsorptionProbability / ProbabilitiesSum);
+				float Scattering_CMF = Absorption_CMF + saturate(ScatteringProbability / ProbabilitiesSum);
+
+				float u = RandomSequence_GenerateSample1D(PathState.RandSequence);
+
+				if (u <= Scattering_CMF)
+				{
+					if (bLastBounce || u <= Absorption_CMF || !any(PathState.PathThroughput > 0))
+					{
+						bTerminated = true;
+						break;
+					}
+
+					PathState.PathThroughput *= Albedo;
+
+					// Sample direct lighting at this vertex
+					PathState.Radiance += PathState.PathThroughput * HVPT_DirectLight_Medium(Result.PhaseG, WorldPosition, PathState.Ray.Direction, PathState.RandSequence);
+
+					// Sample phase function for new scattering direction
+					float4 DirectionAndPDF = ImportanceSampleHenyeyGreensteinPhase(RandomSequence_GenerateSample2D(PathState.RandSequence), Result.PhaseG);
+					float3 Direction = TangentToWorld(DirectionAndPDF.xyz, PathState.Ray.Direction);
+					float PhasePDF = DirectionAndPDF.w;
+
+					if (PhasePDF == 0.0f)
+					{
+						// No continuation is possible
+						bTerminated = true;
+						break;
+					}
+
+					// Update ray state for scattering
+					PathState.Ray.Origin = WorldPosition;
+					PathState.Ray.Direction = Direction;
+					PathState.Ray.TMin = 0.0f;
+					PathState.Ray.TMax = POSITIVE_INFINITY;
+
+					bScattered = true;
+					break;
+				}
+			}
+			else
+			{
+				// Exited volume
+				break;
+			}
+		}
+
+		if (bTerminated || !any(PathState.PathThroughput > 0))
+		{
+			return false;
+		}
+		if (bScattered)
+		{
+			// Ray will have been updated to new scatter direction from phase function sample
+			return true;
+		}
+	}
+
+#if USE_SURFACE_CONTRIBUTIONS
+	// Process surface hits for any rays that escaped the volume
+	if (SurfacePayload.IsHit())
+	{
+		// Accumulate any surface emission from where the ray hit
+		if (any(SurfacePayload.Radiance > 0.0f))
+		{
+			PathState.Radiance += PathState.PathThroughput * SurfacePayload.Radiance;
+		}
+		else
+		{
+			PathState.Radiance += PathState.PathThroughput * HVPT_DirectLight_Surface(SurfacePayload, PathState.Ray.Direction, PathState.RandSequence);
+		}
+	}
+	// TODO: Do I want to be sampling any light when rays escape the volume and do not hit a surface (go off into infinity?)
+#endif // USE_SURFACE_CONTRIBUTIONS
+
+	// Ray has not been bounced or scattered and should terminate
+	return false;
+}
+
+
+RAY_TRACING_ENTRY_RAYGEN(HVPT_RenderWithPathTracingRGS)
+{
+	// Calculate a ray from this point
+	uint2 PixelCoord = DispatchRaysIndex().xy;
+	FHVPT_PathState PathState = HVPT_CreatePathState(PixelCoord);
+
+	for (uint Bounce = 0; Bounce < MaxBounces; Bounce++)
+	{
+		bool KeepGoing = HVPT_PathTracingKernel(PathState, Bounce);
+		if (!KeepGoing)
+		{
+			break;
+		}
+	}
+
+	// Transmittance is calculated separately
+	RWRadianceTexture[PixelCoord] = PathState.Radiance * View.PreExposure;
+}

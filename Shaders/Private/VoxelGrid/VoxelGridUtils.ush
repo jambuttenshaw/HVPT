@@ -1,0 +1,188 @@
+#ifndef VOXELGRIDUTILS_H
+#define VOXELGRIDUTILS_H
+
+#include "VoxelGridTypes.ush"
+#include "VoxelGridBuildUtils.ush"
+#include "../Utils/FrustumUtils.ush"
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/PathTracing/Volume/PathTracingVolumeCommon.ush"
+#include "/Engine/Private/HeterogeneousVolumes/HeterogeneousVolumesTracingUtils.ush"
+
+
+float3 HVPT_GetTranslatedWorldPos(float3 WorldPos)
+{
+	float3 TranslatedWorldPos = DFFastToTranslatedWorld(WorldPos, PrimaryView.PreViewTranslation);
+	return TranslatedWorldPos;
+}
+
+FVolumeIntersection HVPT_Intersect(float3 Origin, float3 Direction, float TMin, float TMax)
+{
+	float3 WorldBoundsMin = HVPT_FrustumGrid.TopLevelGridWorldBoundsMin;
+	float3 WorldBoundsMax = HVPT_FrustumGrid.TopLevelGridWorldBoundsMax;
+	if (HVPT_OrthoGrid.bUseOrthoGrid)
+	{
+		WorldBoundsMin = HVPT_OrthoGrid.TopLevelGridWorldBoundsMin;
+		WorldBoundsMax = HVPT_OrthoGrid.TopLevelGridWorldBoundsMax;
+	}
+
+	if (HVPT_OrthoGrid.bUseOrthoGrid || HVPT_FrustumGrid.bUseFrustumGrid)
+	{
+		float3 TranslatedWorldBoundsMin = HVPT_GetTranslatedWorldPos(WorldBoundsMin);
+		float3 TranslatedWorldBoundsMax = HVPT_GetTranslatedWorldPos(WorldBoundsMax);
+
+		float2 RayHitT = IntersectAABB(
+			Origin,
+			Direction,
+			TMin,
+			TMax,
+			TranslatedWorldBoundsMin,
+			TranslatedWorldBoundsMax
+		);
+
+		return CreateVolumeIntersection(RayHitT.x, RayHitT.y);
+	}
+	return CreateEmptyVolumeIntersection();
+}
+
+bool HVPT_GetOrthoVoxelGridLinearBottomLevelVoxelPos(float3 TranslatedWorldPos, out uint LinearBottomLevelVoxelPos)
+{
+	float3 TranslatedWorldBoundsMin = HVPT_GetTranslatedWorldPos(HVPT_OrthoGrid.TopLevelGridWorldBoundsMin);
+	float3 TranslatedWorldBoundsMax = HVPT_GetTranslatedWorldPos(HVPT_OrthoGrid.TopLevelGridWorldBoundsMax);
+	float3 TranslatedWorldBoundsExtent = TranslatedWorldBoundsMax - TranslatedWorldBoundsMin;
+	float3 GridUV = (TranslatedWorldPos - TranslatedWorldBoundsMin) / TranslatedWorldBoundsExtent;
+	if (all(GridUV >= 0.0) && all(GridUV <= 1.0))
+	{
+		float3 TopLevelVoxelPos = GridUV * HVPT_OrthoGrid.TopLevelGridResolution;
+		uint LinearTopLevelVoxelPos = GetLinearIndex(TopLevelVoxelPos, HVPT_OrthoGrid.TopLevelGridResolution);
+
+		FHVPT_TopLevelGridData TopLevelData = HVPT_OrthoGrid.TopLevelGridBuffer[LinearTopLevelVoxelPos];
+		if (IsBottomLevelAllocated(TopLevelData))
+		{
+			uint BottomLevelIndex = GetBottomLevelIndex(HVPT_OrthoGrid.TopLevelGridBuffer[LinearTopLevelVoxelPos]);
+			uint3 BottomLevelVoxelResolution = GetBottomLevelVoxelResolution(HVPT_OrthoGrid.TopLevelGridBuffer[LinearTopLevelVoxelPos]);
+
+			// Constant Interpolation
+			float3 BottomLevelVoxelPos = frac(TopLevelVoxelPos) * BottomLevelVoxelResolution;
+			int3 BottomLevelVoxelPosAsInt = clamp(BottomLevelVoxelPos, 0, BottomLevelVoxelResolution - 1);
+
+			LinearBottomLevelVoxelPos = BottomLevelIndex + MortonEncode3(BottomLevelVoxelPosAsInt);
+			return true;
+		}
+		
+	}
+	LinearBottomLevelVoxelPos = -1;
+	return false;
+}
+
+FVolumeShadedResult HVPT_GetOrthoVoxelGridDensity(float3 TranslatedWorldPos)
+{
+	float3 SigmaT = 0.0;
+	float3 Scattering = 0.0;
+	float3 Emission = 0.0;
+
+	uint LinearBottomLevelVoxelPos;
+	if (HVPT_GetOrthoVoxelGridLinearBottomLevelVoxelPos(TranslatedWorldPos, LinearBottomLevelVoxelPos))
+	{
+		SigmaT = GetExtinction(HVPT_OrthoGrid.ExtinctionGridBuffer[LinearBottomLevelVoxelPos]);
+		Scattering = GetScattering(HVPT_OrthoGrid.ScatteringGridBuffer[LinearBottomLevelVoxelPos]);
+		Emission = GetEmission(HVPT_OrthoGrid.EmissionGridBuffer[LinearBottomLevelVoxelPos]);
+	}
+
+	FVolumeShadedResult Result = (FVolumeShadedResult) 0;
+	Result.SigmaT = SigmaT;
+	Result.SigmaSHG = Scattering;
+	Result.Emission = Emission;
+
+	return Result;
+}
+
+bool HVPT_GetFrustumVoxelGridLinearBottomLevelVoxelPos(float3 TranslatedWorldPos, inout bool bInFrustum, out uint LinearBottomLevelVoxelPos)
+{
+	// Convert TranslatedWorldPos to voxel space
+	float3 WorldPos = DFHackToFloat(DFFastSubtract(TranslatedWorldPos, PrimaryView.PreViewTranslation));
+	float3 ViewPos = mul(float4(WorldPos, 1), HVPT_FrustumGrid.WorldToView).xyz;
+
+	int3 VoxelDimensions = HVPT_FrustumGrid.VoxelDimensions;
+	float NearPlaneDepth = HVPT_FrustumGrid.NearPlaneDepth;
+	float FarPlaneDepth = HVPT_FrustumGrid.FarPlaneDepth;
+	float TanHalfFOV = HVPT_FrustumGrid.TanHalfFOV;
+	float3 VoxelPos = ViewToVoxel(ViewPos, VoxelDimensions, NearPlaneDepth, FarPlaneDepth, TanHalfFOV);
+
+	bInFrustum = all(VoxelPos > 0) && all(VoxelPos < HVPT_FrustumGrid.TopLevelFroxelGridResolution);
+	if (bInFrustum)
+	{
+		uint LinearTopLevelVoxelPos = GetLinearIndex(VoxelPos, HVPT_FrustumGrid.TopLevelFroxelGridResolution);
+		FHVPT_TopLevelGridData TopLevelGridData = HVPT_FrustumGrid.TopLevelFroxelGridBuffer[LinearTopLevelVoxelPos];
+		if (IsBottomLevelAllocated(TopLevelGridData))
+		{
+			uint BottomLevelIndex = GetBottomLevelIndex(TopLevelGridData);
+			uint3 BottomLevelVoxelResolution = GetBottomLevelVoxelResolution(TopLevelGridData);
+
+			float3 BottomLevelVoxelPos = frac(VoxelPos) * BottomLevelVoxelResolution;
+			LinearBottomLevelVoxelPos = BottomLevelIndex + MortonEncode3(uint3(BottomLevelVoxelPos));
+			return true;
+		}
+	}
+	LinearBottomLevelVoxelPos = -1;
+	return false;
+}
+
+FVolumeShadedResult HVPT_GetFrustumVoxelGridDensity(float3 TranslatedWorldPos, inout bool bInFrustum)
+{
+	float3 SigmaT = 0.0;
+	float3 Scattering = 0.0;
+	float3 Emission = 0.0;
+
+	uint LinearBottomLevelVoxelPos;
+	if (HVPT_GetFrustumVoxelGridLinearBottomLevelVoxelPos(TranslatedWorldPos, bInFrustum, LinearBottomLevelVoxelPos))
+	{
+		SigmaT = GetExtinction(HVPT_FrustumGrid.ExtinctionFroxelGridBuffer[LinearBottomLevelVoxelPos]);
+		Scattering = GetScattering(HVPT_FrustumGrid.ScatteringFroxelGridBuffer[LinearBottomLevelVoxelPos]);
+		Emission = GetEmission(HVPT_FrustumGrid.EmissionFroxelGridBuffer[LinearBottomLevelVoxelPos]);
+	}
+
+	// Return struct
+	FVolumeShadedResult Result = (FVolumeShadedResult) 0;
+	Result.SigmaT = SigmaT;
+	Result.SigmaSHG = Scattering;
+	Result.Emission = Emission;
+	return Result;
+}
+
+FVolumeShadedResult HVPT_GetDensity(float3 TranslatedWorldPos)
+{
+	FVolumeShadedResult Result = (FVolumeShadedResult) 0;
+
+	bool bInFrustum = false;
+	if (HVPT_FrustumGrid.bUseFrustumGrid)
+	{
+		Result = HVPT_GetFrustumVoxelGridDensity(TranslatedWorldPos, bInFrustum);
+	}
+	if (!bInFrustum && HVPT_OrthoGrid.bUseOrthoGrid)
+	{
+		Result = HVPT_GetOrthoVoxelGridDensity(TranslatedWorldPos);
+	}
+	return Result;
+}
+
+float3 HVPT_GetVelocity(float3 TranslatedWorldPos)
+{
+	float3 Result = 0.0f;
+
+	bool bInFrustum = false;
+	uint LinearBottomLevelVoxelPos;
+	if (HVPT_FrustumGrid.bUseFrustumGrid
+		&& HVPT_GetFrustumVoxelGridLinearBottomLevelVoxelPos(TranslatedWorldPos, bInFrustum, LinearBottomLevelVoxelPos))
+	{
+		Result = GetVelocity(HVPT_FrustumGrid.VelocityFroxelGridBuffer[LinearBottomLevelVoxelPos]);
+	}
+	if (!bInFrustum && HVPT_OrthoGrid.bUseOrthoGrid
+		&& HVPT_GetOrthoVoxelGridLinearBottomLevelVoxelPos(TranslatedWorldPos, LinearBottomLevelVoxelPos))
+	{
+		Result = GetVelocity(HVPT_OrthoGrid.VelocityGridBuffer[LinearBottomLevelVoxelPos]);
+	}
+	return Result;
+}
+
+#endif

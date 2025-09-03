@@ -1,0 +1,21 @@
+#ifndef VOXELGRIDTYPES_H
+#define VOXELGRIDTYPES_H
+
+struct FHVPT_TopLevelGridData
+{
+	uint PackedData[1];
+};
+
+struct FHVPT_GridData
+{
+	uint PackedData[2];
+};
+
+#define EMPTY_VOXEL_INDEX 0x1FFFFFFF
+
+struct FRasterTileData
+{
+	uint TopLevelGridLinearIndex;
+};
+
+#endif

@@ -1,0 +1,43 @@
+#pragma once
+
+
+#ifdef __cplusplus
+#include "HLSLTypeAliases.h"
+
+namespace UE::HLSL
+{
+#endif
+
+
+struct FHVPT_Reservoir
+{
+	float RunningSum;	// The sum of all weights of all samples processed by this reservoir
+	float M;			// The effective sample account of this reservoir - the number of candidate samples processed
+	float P_y;			// The target function evaluation for the sample in this reservoir
+
+	// Data to recover the path stored in the reservoir
+	// TODO: Data packing
+	bool bEmissionPath;   // Whether this path is a scattering or emission path
+	// TODO: Pack pixel index and num extra bounces together (into one int? would give max resolution of 16k x 16k and 15 max bounces)
+	uint NumExtraBounces; // The number of bounces stored in the extra bounces buffer
+	float Depth;		  // Distance along ray that first scattering event occurs
+	int LightId;		  // If scattering path, the light source that the path should sample
+	float2 LightSample;   // RNG for the light sample to re-eval the same point on the light
+};
+
+
+// (omega, z) tuples describing subsequent bounces after the first scattering event
+struct FHVPT_Bounce
+{
+	float3 Direction;
+	float Distance;
+};
+
+
+#ifdef __cplusplus
+}
+
+using FHVPT_Reservoir = UE::HLSL::FHVPT_Reservoir;
+using FHVPT_Bounce = UE::HLSL::FHVPT_Bounce;
+
+#endif

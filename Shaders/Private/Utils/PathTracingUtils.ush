@@ -1,0 +1,169 @@
+#ifndef PATHTRACINGUTILS_H
+#define PATHTRACINGUTILS_H
+
+
+#include "/Engine/Private/Common.ush"
+
+#include "/Engine/Shared/RayTracingDefinitions.h"
+#include "/Engine/Shared/PathTracingDefinitions.h"
+
+#include "/Engine/Private/RayTracing/RayTracingCommon.ush"
+#include "/Engine/Private/PathTracing/PathTracingCommon.ush"
+
+#include "/Engine/Private/PathTracing/Volume/PathTracingVolumeCommon.ush"
+#include "/Engine/Private/PathTracing/Light/PathTracingLightSampling.ush"
+
+#include "../VoxelGrid/VoxelGridUtils.ush"
+
+
+// Ray construction helpers
+
+float2 HVPT_GetSubpixelJitter()
+{
+	return View.TemporalAAJitter.xy;
+}
+
+// DeviceZ is only used to calculate TMax when bFromDepth is true
+template<bool bFromDepth = false>
+FRayDesc HVPT_CreateRayDesc(uint2 PixelCoord, float DeviceZ = 0.0f)
+{
+	float2 ScreenPos = float2(PixelCoord) + HVPT_GetSubpixelJitter();
+	float4 TranslatedWorldPosition = mul(float4(ScreenPos, 1, 1), View.SVPositionToTranslatedWorld);
+	TranslatedWorldPosition.xyz /= TranslatedWorldPosition.w;
+
+	float3 WorldOrigin = TranslatedWorldPosition.xyz;
+	float3 WorldDirection = GetCameraVectorFromTranslatedWorldPosition(TranslatedWorldPosition.xyz);
+
+	FRayDesc RayDesc;
+	RayDesc.Origin = WorldOrigin;
+	RayDesc.Direction = WorldDirection;
+	RayDesc.TMin = 0.0f;
+	RayDesc.TMax = POSITIVE_INFINITY;
+
+	if (bFromDepth)
+	{
+#ifdef HAS_INVERTED_Z_BUFFER
+		DeviceZ = max(0.000000000001, DeviceZ);
+#endif // HAS_INVERTED_Z_BUFFER
+		RayDesc.TMax = distance(WorldOrigin, ReconstructTranslatedWorldPositionFromDeviceZ(PixelCoord, DeviceZ));
+	}
+
+	return RayDesc;
+}
+
+// Also intersects the ray against the volume bounding box, which is required to do before using most tracking algorithms
+// TMin == TMax == 0 If the constructed ray does not intersect the volume BB
+template<bool bIntersectWithVolume = true>
+FRayDesc HVPT_CreateRayDesc(float3 Origin, float3 Direction, float TMin, float TMax)
+{
+	FRayDesc Ray = (FRayDesc)0;
+	Ray.Origin = Origin;
+	Ray.Direction = Direction;
+
+	if (bIntersectWithVolume)
+	{
+		FVolumeIntersection Intersection = HVPT_Intersect(Ray.Origin, Ray.Direction, TMin, TMax);
+		if (Intersection.HitVolume())
+		{
+			Ray.TMin = Intersection.VolumeTMin;
+			Ray.TMax = Intersection.VolumeTMax;
+		}
+	}
+	else
+	{
+		Ray.TMin = TMin;
+		Ray.TMax = TMax;
+	}
+
+	return Ray;
+}
+
+FRayDesc HVPT_CreateRayDesc(float3 Origin, float3 Direction)
+{
+	return HVPT_CreateRayDesc(Origin, Direction, 0.0f, POSITIVE_INFINITY);
+}
+
+
+// Helper functions for interacting with UEs path tracer, which HVPT is built on top of
+
+uint SceneInfiniteLightCount;
+
+
+// The method implemented in the path tracer did not work for HV albedo colours != white.
+// By using the base colour as the single-scattering albedo, the volume is coloured as expected
+FPathTracingPayload HVPT_CreateMediumHitPayload(float HitT, float3 TranslatedWorldPos, FVolumeShadedResult ShadedResult)
+{
+	FPathTracingPayload Result = (FPathTracingPayload) 0; // clear all fields
+	Result.HitT = HitT;
+	Result.TranslatedWorldPos = TranslatedWorldPos;
+	Result.ShadingModelID = SHADINGMODELID_MEDIUM;
+	Result.BSDFOpacity = 1.0;
+	Result.PrimitiveLightingChannelMask = 7;
+	Result.SetFrontFace();
+	Result.SetHG(ShadedResult.SigmaSHG / ShadedResult.SigmaT, ShadedResult.PhaseG);
+	return Result;
+}
+
+// To integrate with the raytracing scene (and avoid defining our own closest hit shaders) HV's use the material ray tracing pipeline
+// However, to work with the path tracer's library of functionality, we need to translate that into a path tracing payload
+FPathTracingPayload HVPT_CreateSurfaceHitPayload(FMaterialClosestHitPayload MaterialPayload)
+{
+	FPathTracingPayload Payload = (FPathTracingPayload) 0;
+	Payload.HitT = MaterialPayload.HitT;
+	Payload.ShadingModelID = SHADINGMODELID_DEFAULT_LIT; // TODO: Is it useful to consider other shading models?
+	Payload.Radiance = MaterialPayload.Radiance;
+	Payload.TranslatedWorldPos = MaterialPayload.TranslatedWorldPos;
+	Payload.WorldNormal = MaterialPayload.WorldNormal;
+	Payload.WorldSmoothNormal = MaterialPayload.WorldNormal;
+	Payload.BSDFOpacity = MaterialPayload.Opacity;
+	Payload.PrimitiveLightingChannelMask = MaterialPayload.PrimitiveLightingChannelMask;
+
+	Payload.DiffuseColor = MaterialPayload.DiffuseColor;
+	Payload.SpecularColor = MaterialPayload.SpecularColor;
+	Payload.Roughness = MaterialPayload.Roughness;
+	Payload.Anisotropy = MaterialPayload.Anisotropy;
+	Payload.WorldTangent = MaterialPayload.WorldTangent;
+
+	return Payload;
+}
+
+// WorldNormal can be left 0 for participating media
+template<bool bInfiniteLightsOnly=false>
+FLightSample HVPT_SampleLight(float3 TranslatedWorldPos, float3 WorldNormal, float3 LightRandSample, out uint LightId)
+{
+	float LightPickingCdf[RAY_TRACING_LIGHT_COUNT_MAXIMUM];
+	float LightPickingCdfSum = 0;
+
+	FLightSample LightSample = (FLightSample) 0;
+
+	const uint LightCount = bInfiniteLightsOnly ? SceneInfiniteLightCount : SceneLightCount;
+	for (uint LightIndex = 0; LightIndex < LightCount; ++LightIndex)
+	{
+		const uint PrimitiveLightingChannelMask = 7;
+		float LightEstimate = EstimateLight(LightIndex, TranslatedWorldPos, WorldNormal, PrimitiveLightingChannelMask, true) * GetVolumetricScatteringIntensity(LightIndex);
+
+		LightPickingCdfSum += LightEstimate;
+		LightPickingCdf[LightIndex] = LightPickingCdfSum;
+	}
+
+	if (LightPickingCdfSum <= 0)
+	{
+		// PDF of light sample will be 0
+		return LightSample;
+	}
+
+	float LightPickPdf = 0;
+	LightId = -1;
+	SelectLight(LightRandSample.x * LightPickingCdfSum, SceneLightCount, LightPickingCdf, LightId, LightPickPdf);
+	LightPickPdf /= LightPickingCdfSum;
+
+	// Sample a point on the light source
+	LightSample = SampleLight(LightId, LightRandSample.yz, TranslatedWorldPos, WorldNormal);
+	// Incorporated light pick PDF into PDF of light sample
+	LightSample.RadianceOverPdf /= LightPickPdf;
+	LightSample.Pdf *= LightPickPdf;
+
+	return LightSample;
+}
+
+#endif

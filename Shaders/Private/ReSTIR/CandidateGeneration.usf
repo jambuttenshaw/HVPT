@@ -1,0 +1,281 @@
+
+// This needs to be first for generated uniform buffer ush to compile
+#include "../VoxelGrid/VoxelGridTypes.ush"
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/RayTracing/RayTracingCommon.ush"
+#include "/Engine/Private/PathTracing/Volume/PathTracingVolumeCommon.ush"
+
+#include "../../Shared/HVPTDefinitions.h"
+
+#include "ReSTIRUtils.ush"
+
+
+#ifndef MULTIPLE_BOUNCES
+#define MULTIPLE_BOUNCES true
+#endif
+
+#ifndef USE_SURFACE_CONTRIBUTIONS
+#define USE_SURFACE_CONTRIBUTIONS true
+#endif
+
+// Uses a copy of the scene depth, that was made before writing HVPT into it
+Texture2D<float> SceneDepthTexture_Copy;
+
+uint TemporalSeed;
+
+uint NumInitialCandidates;
+
+RWStructuredBuffer<FHVPT_Reservoir> RWCurrentReservoirs;
+RWStructuredBuffer<FHVPT_Bounce> RWExtraBounces;
+
+
+RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
+{
+	uint2 PixelCoord = DispatchRaysIndex().xy;
+	FHVPT_Reservoir OutReservoir = (FHVPT_Reservoir)0;
+
+#if MULTIPLE_BOUNCES
+	FHVPT_Bounce OutBounces[MAX_EXTRA_BOUNCES];
+#endif
+
+	// Get ray origin and direction
+	float DeviceZ = SceneDepthTexture_Copy.Load(uint3(PixelCoord, 0)).r;
+	FRayDesc Ray = HVPT_CreateRayDesc<true>(PixelCoord, DeviceZ);
+
+	// Find extents of intersection with volume bounding box
+	FVolumeIntersection VolIntersect = HVPT_Intersect(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
+	if (!VolIntersect.HitVolume())
+	{
+		// Output an empty reservoir
+		RWCurrentReservoirs[HVPT_GetReservoirIndex(PixelCoord)] = OutReservoir;
+		return;
+	}
+
+	Ray.TMin = VolIntersect.VolumeTMin;
+	Ray.TMax = VolIntersect.VolumeTMax;
+
+	FRayDesc PrimaryRay = Ray;
+
+	// Create random sequence
+	RandomSequence RandSequence = (RandomSequence)0;
+	uint LinearPixelIndex = PixelCoord.y * View.ViewSizeAndInvSize.x + PixelCoord.x;
+	RandomSequence_Initialize(RandSequence, LinearPixelIndex, TemporalSeed);
+
+	// Create initial samples
+	for (uint m = 0; m < NumInitialCandidates; m++)
+	{
+		// Create reservoir to store current sample
+		FHVPT_Reservoir Reservoir_m = (FHVPT_Reservoir)0;
+#if MULTIPLE_BOUNCES
+		FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES];
+#endif
+
+		float PrimaryRayDistance = POSITIVE_INFINITY;
+
+		float P_hat = 1.0f;
+		float Pdf = 1.0f;
+
+		// For each bounce in path
+		for (uint Bounce = 0; Bounce < NumBounces; Bounce++)
+		{
+			// Perform tracking to get a distance into the volume
+			FHVPT_TrackingResult TrackingResult = HVPT_DeltaTracking(Ray, RandSequence);
+			float3 TranslatedWorldPos = Ray.Origin + TrackingResult.Distance * Ray.Direction;
+
+			// Add new vertex to path
+			if (Bounce == 0)
+			{
+				PrimaryRayDistance = TrackingResult.Distance;
+			}
+#if MULTIPLE_BOUNCES
+			else
+			{
+				Bounces[Bounce - 1].Direction = Ray.Direction;
+				Bounces[Bounce - 1].Distance = TrackingResult.Distance;
+			}
+#endif
+
+			// In case of escaping the volume
+			if (TrackingResult.Distance == POSITIVE_INFINITY)
+			{
+#if USE_SURFACE_CONTRIBUTIONS
+				// Don't consider surfaces on the camera ray
+				if (Bounce > 0)
+				{
+					Ray.TMin = 0.0f;
+					Ray.TMax = POSITIVE_INFINITY;
+
+					FRayCone RayCone = (FRayCone)0;
+					FMaterialClosestHitPayload MaterialPayload = TraceMaterialRay(
+									TLAS,
+									0,
+									PATHTRACER_MASK_ALL,
+									Ray,
+									RayCone,
+									false,
+									true,
+									false
+								);
+
+					// Consider surface emission path
+					{
+						// TODO: Do I need to include geometry term G = 1 / (z * z)?
+						float P_hat_prime = P_hat * Luminance(MaterialPayload.Radiance);
+						float Pdf_prime = MaterialPayload.IsHit() ? Pdf : 0; // Radiance should be 0 if not a hit anyway
+
+						if (HVPT_UpdateReservoir(Reservoir_m, Pdf_prime, P_hat_prime, RandomSequence_GenerateSample1D(RandSequence)))
+						{
+							// Path was selected - store path in reservoir
+							// z_i for the last bounce will be POSITIVE_INFINITY - that is how the final shading will know this is a surface hit
+							Reservoir_m.bEmissionPath = true;
+							Reservoir_m.NumExtraBounces = Bounce;
+							Reservoir_m.Depth = PrimaryRayDistance;
+						}
+					}
+
+					// Consider surface scattering path
+					{
+						FPathTracingPayload Payload = HVPT_CreateSurfaceHitPayload(MaterialPayload);
+
+						// Pick a light source to sample
+						uint LightId = -1;
+						float3 LightRandValue = RandomSequence_GenerateSample3D(RandSequence);
+						FLightSample LightSample = HVPT_SampleLight(Payload.TranslatedWorldPos, Payload.WorldNormal, LightRandValue, LightId);
+						float3 LightRadiance = LightSample.RadianceOverPdf * LightSample.Pdf;
+
+						// Eval material
+						// TODO: Handle diffuse specular scale for non media materials
+						// TODO: Handle material eval PDF
+						FMaterialEval MaterialEval = EvalMaterial(-Ray.Direction, LightSample.Direction, Payload, float2(1.0f, 0.0f));
+
+						// Trace visibility ray
+						float3 Visibility = HVPT_CalculateLightVisibility<false>(Payload.TranslatedWorldPos, LightSample, RandSequence);
+
+						float P_hat_prime = P_hat * Luminance(LightRadiance * Visibility * MaterialEval.Weight * MaterialEval.Pdf);
+						float Pdf_prime = Pdf * LightSample.Pdf;
+
+						if (HVPT_UpdateReservoir(Reservoir_m, Pdf_prime, P_hat_prime, RandomSequence_GenerateSample1D(RandSequence)))
+						{
+							// Path was selected - store path in reservoir
+							Reservoir_m.bEmissionPath = false;
+							Reservoir_m.NumExtraBounces = Bounce;
+							Reservoir_m.Depth = PrimaryRayDistance;
+							Reservoir_m.LightId = LightId;
+							Reservoir_m.LightSample = LightRandValue.yz;
+						}
+					}
+				}
+#endif
+				break;
+			}
+
+			// In case of zero extinction at sample location
+			if (!any(TrackingResult.SigmaT > 0.0f))
+			{
+				// Pdf will become 0, no extension of this path will be considered by RIS
+				break;
+			}
+
+			Pdf *= Luminance(TrackingResult.SigmaT * TrackingResult.Transmittance);
+			P_hat *= Luminance(TrackingResult.Transmittance);
+
+			// Consider emission path
+			{
+				float3 SigmaA = TrackingResult.SigmaT - TrackingResult.SigmaS;
+				float P_hat_prime = P_hat * Luminance(/*SigmaA * */TrackingResult.Emission);
+
+				if (HVPT_UpdateReservoir(Reservoir_m, Pdf, P_hat_prime, RandomSequence_GenerateSample1D(RandSequence)))
+				{
+					// Path was selected - store path in reservoir
+					Reservoir_m.bEmissionPath = true;
+					Reservoir_m.NumExtraBounces = Bounce;
+					Reservoir_m.Depth = PrimaryRayDistance;
+					// Emission paths won't use light properties
+				}
+			}
+
+			// Consider scattering path
+			{
+				// Perform light sampling
+				uint LightId = -1;
+				float3 LightRandValue = RandomSequence_GenerateSample3D(RandSequence);
+				FLightSample LightSample = HVPT_SampleLight(TranslatedWorldPos, 0.0f, LightRandValue, LightId);
+				float3 LightRadiance = LightSample.RadianceOverPdf * LightSample.Pdf;
+
+				float3 ScatteringVisibility = HVPT_CalculateLightVisibility<false>(TranslatedWorldPos, LightSample, RandSequence);
+				float Phase = HenyeyGreensteinPhase(TrackingResult.PhaseG, dot(-Ray.Direction, LightSample.Direction));
+
+				float P_hat_prime = P_hat * Luminance(TrackingResult.SigmaS * Phase * LightRadiance * ScatteringVisibility);
+				float Pdf_prime = Pdf * LightSample.Pdf;
+
+				// Consider path for resampling
+				if (HVPT_UpdateReservoir(Reservoir_m, Pdf_prime, P_hat_prime, RandomSequence_GenerateSample1D(RandSequence)))
+				{
+					// Path was selected - store path in reservoir
+					Reservoir_m.bEmissionPath = false;
+					Reservoir_m.NumExtraBounces = Bounce;
+					Reservoir_m.Depth = PrimaryRayDistance;
+					Reservoir_m.LightId = LightId;
+					Reservoir_m.LightSample = LightRandValue.yz;
+				}
+			}
+
+#if MULTIPLE_BOUNCES
+			// Sample phase function for new scattering direction
+			float4 DirectionAndPDF = ImportanceSampleHenyeyGreensteinPhase(RandomSequence_GenerateSample2D(RandSequence), TrackingResult.PhaseG);
+			float3 SampleDirection = TangentToWorld(DirectionAndPDF.xyz, Ray.Direction);
+			float PhasePDF = DirectionAndPDF.w;
+
+			P_hat *= Luminance(TrackingResult.SigmaS * HenyeyGreensteinPhase(TrackingResult.PhaseG, dot(-Ray.Direction, SampleDirection)));
+			Pdf *= PhasePDF;
+
+			// Create a new ray pointing in the sampled direction
+			Ray = HVPT_CreateRayDesc(TranslatedWorldPos, SampleDirection);
+#endif
+		} // For each bounce
+
+		if (Reservoir_m.RunningSum > 0.0f)
+		{
+			// Evaluate target function for candidate path
+			float PathP_hat = Luminance(HVPT_EvaluateF<false>(Reservoir_m,
+#if MULTIPLE_BOUNCES
+				Bounces,
+#endif
+				PrimaryRay, RandSequence));
+
+			// Combine reservoirs
+			Reservoir_m.M = 1;
+			if (HVPT_CombineReservoirs(OutReservoir, Reservoir_m, PathP_hat, 1, RandomSequence_GenerateSample1D(RandSequence)))
+			{
+				OutReservoir.bEmissionPath = Reservoir_m.bEmissionPath;
+				OutReservoir.NumExtraBounces = Reservoir_m.NumExtraBounces;
+				OutReservoir.Depth = Reservoir_m.Depth;
+				OutReservoir.LightId = Reservoir_m.LightId;
+				OutReservoir.LightSample = Reservoir_m.LightSample;
+#if MULTIPLE_BOUNCES
+				// Copy over extra bounces
+				for (uint i = 0; i < OutReservoir.NumExtraBounces; i++)
+				{
+					OutBounces[i] = Bounces[i];
+				}
+#endif
+			}
+		}
+
+		// Reset ray for next candidate
+		Ray = PrimaryRay;
+	} // For each initial candidate
+
+	// Output reservoir
+	RWCurrentReservoirs[HVPT_GetReservoirIndex(PixelCoord)] = OutReservoir;
+
+#if MULTIPLE_BOUNCES
+	// Output bounces
+	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(PixelCoord, 0);
+	for (uint i = 0; i < OutReservoir.NumExtraBounces; i++)
+	{
+		RWExtraBounces[ExtraBounceIndex + i] = OutBounces[i];
+	}
+#endif
+}

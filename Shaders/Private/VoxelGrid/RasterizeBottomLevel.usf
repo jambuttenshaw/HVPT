@@ -1,0 +1,506 @@
+
+#include "VoxelGridTypes.ush"
+
+#include "/Engine/Private/Common.ush"
+#if HVPT_MATERIAL_PASS
+#include "/Engine/Generated/Material.ush"
+#endif
+#include "/Engine/Private/ComputeShaderUtils.ush"
+#include "/Engine/Private/BlueNoise.ush"
+
+#include "VoxelGridBuildUtils.ush"
+#include "../Utils/FrustumUtils.ush"
+#include "MaterialUtils.ush"
+
+#ifndef THREADGROUP_SIZE_1D
+#define THREADGROUP_SIZE_1D 1
+#endif
+
+#ifndef THREADGROUP_SIZE_3D
+#define THREADGROUP_SIZE_3D 1
+#endif
+
+// Object data
+float3 PrimitiveWorldBoundsMin;
+float3 PrimitiveWorldBoundsMax;
+float4x4 LocalToWorld;
+float4x4 WorldToLocal;
+float3 LocalBoundsOrigin;
+float3 LocalBoundsExtent;
+int PrimitiveId;
+
+int3 TopLevelGridResolution;
+float3 TopLevelGridWorldBoundsMin;
+float3 TopLevelGridWorldBoundsMax;
+
+int3 VoxelDimensions;
+float4x4 ViewToWorld;
+
+float TanHalfFOV;
+float NearPlaneDepth;
+float FarPlaneDepth;
+
+int BottomLevelGridBufferSize;
+
+// Velocity parameters
+float4x4 LocalToWorld_Velocity; // LocalToWorld has instance transform built in - we don't want that for velocity vectors
+
+// Sampling mode
+int bJitter;
+
+Buffer<uint> RasterTileAllocatorBuffer;
+StructuredBuffer<FRasterTileData> RasterTileBuffer;
+
+RWStructuredBuffer<FHVPT_TopLevelGridData> RWTopLevelGridBuffer;
+
+RWBuffer<uint> RWBottomLevelGridAllocatorBuffer;
+RWStructuredBuffer<FHVPT_GridData> RWExtinctionGridBuffer;
+RWStructuredBuffer<FHVPT_GridData> RWEmissionGridBuffer;
+RWStructuredBuffer<FHVPT_GridData> RWScatteringGridBuffer;
+RWStructuredBuffer<FHVPT_GridData> RWVelocityGridBuffer;
+
+groupshared float3 GSExtinctionSum[THREADGROUP_SIZE_1D];
+groupshared float GSExtinctionSumScalar[THREADGROUP_SIZE_1D];
+groupshared int3 GSAllocatedVoxelResolution;
+groupshared int GSAllocatedVoxelCount;
+
+
+FPrimitiveSceneData GetPrimitiveData(FMaterialVertexParameters Parameters)
+{
+	return GetPrimitiveData(Parameters, LocalToWorld, WorldToLocal, LocalBoundsOrigin, LocalBoundsExtent);
+}
+
+FPrimitiveSceneData GetPrimitiveData(FMaterialPixelParameters Parameters)
+{
+	return GetPrimitiveData(Parameters, LocalToWorld, WorldToLocal, LocalBoundsOrigin, LocalBoundsExtent);
+}
+
+
+void CalcVoxelBounds(float3 VoxelIndex, inout float3 VoxelBoundsMin, inout float3 VoxelBoundsMax)
+{
+	float3 TopLevelGridWorldBoundsExtent = TopLevelGridWorldBoundsMax - TopLevelGridWorldBoundsMin;
+	VoxelBoundsMin = TopLevelGridWorldBoundsMin + TopLevelGridWorldBoundsExtent * (VoxelIndex / TopLevelGridResolution);
+	VoxelBoundsMax = TopLevelGridWorldBoundsMin + TopLevelGridWorldBoundsExtent * ((VoxelIndex + 1) / TopLevelGridResolution);
+}
+
+bool PrimitiveIntersectsVoxel(float3 VoxelBoundsMin, float3 VoxelBoundsMax)
+{
+	if (any(PrimitiveWorldBoundsMin > VoxelBoundsMax) || any(VoxelBoundsMin > PrimitiveWorldBoundsMax))
+	{
+		return false;
+	}
+
+	return true;
+}
+
+bool WorldPositionIntersectsPrimitive(float3 WorldPosition)
+{
+	return all(WorldPosition >= PrimitiveWorldBoundsMin) && all(WorldPosition <= PrimitiveWorldBoundsMax);
+}
+
+bool LocalPositionIntersectsPrimitive(float3 LocalPosition)
+{
+	float3 LocalMinPosition = LocalBoundsOrigin - LocalBoundsExtent;
+	float3 LocalMaxPosition = LocalBoundsOrigin + LocalBoundsExtent;
+	return all(LocalPosition >= LocalMinPosition) && all(LocalPosition <= LocalMaxPosition);
+}
+
+float GetZeroThreshold()
+{
+	return 1.0e-6;
+}
+
+
+// NOTE: Flow control BEFORE entering this function MUST be UNIFORM ACROSS THE GROUP!
+void HVPT_AccumulatePropertiesInBottomLevelGrid(
+	uint3 GroupThreadId,
+	uint TopLevelGridLinearIndex,
+	FHVPT_TopLevelGridData TopLevelGridData,
+	int3 BottomLevelVoxelResolution,
+	float3 Extinction,
+	float3 Emission,
+	float3 Scattering,
+	float3 Velocity
+)
+{
+	// Aggregate in group-shared memory
+	uint LinearThreadIndex = MortonEncode3(GroupThreadId);
+	GSExtinctionSumScalar[LinearThreadIndex] = Luminance(Extinction);
+	if (all(GroupThreadId == 0))
+	{
+		GSAllocatedVoxelCount = BottomLevelVoxelResolution.x * BottomLevelVoxelResolution.y * BottomLevelVoxelResolution.z;
+	}
+	GroupMemoryBarrierWithGroupSync();
+
+	// Parallel Sum
+	for (int NeighborOffset = 1; NeighborOffset < THREADGROUP_SIZE_1D; NeighborOffset = (NeighborOffset << 1))
+	{
+		int NeighborIndex = LinearThreadIndex + NeighborOffset;
+		GSExtinctionSumScalar[LinearThreadIndex] += (NeighborIndex < THREADGROUP_SIZE_1D) ? GSExtinctionSumScalar[NeighborIndex] : 0.0;
+
+		GroupMemoryBarrierWithGroupSync();
+	}
+
+	if (GSExtinctionSumScalar[0] <= GetZeroThreshold())
+	{
+		return;
+	}
+
+	// Allocate if non-zero voxel data
+	bool bWasAlreadyAllocated = IsBottomLevelAllocated(TopLevelGridData);
+	AllMemoryBarrierWithGroupSync();
+	if (all(GroupThreadId == 0) && !bWasAlreadyAllocated)
+	{
+		uint3 AllocatedVoxelResolution = BottomLevelVoxelResolution;
+		GSAllocatedVoxelCount = AllocatedVoxelResolution.x * AllocatedVoxelResolution.y * AllocatedVoxelResolution.z;
+
+		uint BottomLevelIndex = EMPTY_VOXEL_INDEX;
+		InterlockedAdd(RWBottomLevelGridAllocatorBuffer[0], GSAllocatedVoxelCount, BottomLevelIndex);
+
+		// Guard against over allocation
+		if (BottomLevelIndex + GSAllocatedVoxelCount > BottomLevelGridBufferSize)
+		{
+			// Declare the buffer to be filled
+			uint Dummy;
+			InterlockedExchange(RWBottomLevelGridAllocatorBuffer[0], BottomLevelGridBufferSize, Dummy);
+
+			BottomLevelIndex = EMPTY_VOXEL_INDEX;
+			GSAllocatedVoxelCount = 0;
+			AllocatedVoxelResolution = 0;
+		}
+
+		// Update the index with the properly allocated index
+		FHVPT_TopLevelGridData AllocatedGridData = (FHVPT_TopLevelGridData) 0;
+		SetBottomLevelIndex(AllocatedGridData, BottomLevelIndex);
+		SetBottomLevelVoxelResolution(AllocatedGridData, AllocatedVoxelResolution);
+		RWTopLevelGridBuffer[TopLevelGridLinearIndex] = AllocatedGridData;
+	}
+
+	AllMemoryBarrierWithGroupSync();
+
+	if (LinearThreadIndex < GSAllocatedVoxelCount)
+	{
+		FHVPT_TopLevelGridData OutTopLevelGridData = RWTopLevelGridBuffer[TopLevelGridLinearIndex];
+		if (IsBottomLevelAllocated(OutTopLevelGridData))
+		{
+			uint BottomLevelVoxelLinearIndex = GetBottomLevelIndex(OutTopLevelGridData) + LinearThreadIndex;
+
+			if (bWasAlreadyAllocated)
+			{
+				Extinction += GetExtinction(RWExtinctionGridBuffer[BottomLevelVoxelLinearIndex]);
+				Emission += GetEmission(RWEmissionGridBuffer[BottomLevelVoxelLinearIndex]);
+				Scattering += GetScattering(RWScatteringGridBuffer[BottomLevelVoxelLinearIndex]);
+				Velocity += GetVelocity(RWVelocityGridBuffer[BottomLevelVoxelLinearIndex]);
+			}
+
+			SetExtinction(RWExtinctionGridBuffer[BottomLevelVoxelLinearIndex], Extinction);
+			SetEmission(RWEmissionGridBuffer[BottomLevelVoxelLinearIndex], Emission);
+			SetScattering(RWScatteringGridBuffer[BottomLevelVoxelLinearIndex], Scattering);
+			SetVelocity(RWVelocityGridBuffer[BottomLevelVoxelLinearIndex], Velocity);
+		}
+	}
+}
+
+
+[numthreads(THREADGROUP_SIZE_3D,  THREADGROUP_SIZE_3D,  THREADGROUP_SIZE_3D)]
+void HVPT_RasterizeBottomLevelFrustumGridCS(
+	uint3 GroupId : SV_GroupID,
+	uint3 GroupThreadId : SV_GroupThreadID
+)
+{
+	uint RasterTileIndex = GetUnWrappedDispatchGroupId(GroupId);
+	if (RasterTileIndex >= RasterTileAllocatorBuffer[0])
+	{
+		return;
+	}
+
+	uint TopLevelGridLinearIndex = RasterTileBuffer[RasterTileIndex].TopLevelGridLinearIndex;
+	FHVPT_TopLevelGridData TopLevelGridData = RWTopLevelGridBuffer[TopLevelGridLinearIndex];
+	int3 BottomLevelVoxelResolution = GetBottomLevelVoxelResolution(TopLevelGridData);
+
+	// Setup evaluation context
+	float3 TopLevelVoxelPos = GetVoxelIndex(TopLevelGridLinearIndex, TopLevelGridResolution);
+	float3 BottomLevelVoxelPos = TopLevelVoxelPos * BottomLevelVoxelResolution + GroupThreadId;
+
+	float3 Jitter = 0.5;
+	if (bJitter)
+	{
+		Jitter.z = BlueNoiseScalar(BottomLevelVoxelPos.xy, View.StateFrameIndex);
+	}
+
+	float3 LocalVoxelPos = GroupThreadId + Jitter;
+	float3 VoxelPosition = TopLevelVoxelPos + LocalVoxelPos / BottomLevelVoxelResolution;
+
+	float3 ViewPos = VoxelToView(VoxelPosition, VoxelDimensions, NearPlaneDepth, FarPlaneDepth, TanHalfFOV);
+	float3 WorldPosition = mul(float4(ViewPos, 1), ViewToWorld).xyz;
+
+	float3 Extinction = 0.0f;
+	float3 Emission = 0.0f;
+	float3 Scattering = 0.0f;
+	float3 Velocity = 0.0f;
+
+	if (WorldPositionIntersectsPrimitive(WorldPosition))
+	{
+		FMaterialPixelParameters MaterialParameters = MakeInitializedMaterialPixelParameters();
+		MaterialParameters.PrimitiveId = PrimitiveId;
+		MaterialParameters.AbsoluteWorldPosition = DFPromote(WorldPosition);
+		MaterialParameters.LWCData.AbsoluteWorldPosition = WSPromote(WorldPosition);
+		// TODO: Add object centroid to LWC.ObjectWorldPosition
+		MaterialParameters.LWCData.LocalToWorld = WSPromote(LocalToWorld);
+		MaterialParameters.LWCData.WorldToLocal = WSPromoteInverse(WorldToLocal);
+
+		// Evaluate material graph
+		FPixelMaterialInputs PixelMaterialInputs;
+		CalcPixelMaterialInputs(MaterialParameters, PixelMaterialInputs);
+
+		// Rasterize coefficients
+		Extinction = SampleExtinctionCoefficients(PixelMaterialInputs);
+		Emission = SampleEmissive(PixelMaterialInputs);
+		Scattering = SampleAlbedo(PixelMaterialInputs) * Extinction;
+#if DIM_ENABLE_VELOCITY
+		Velocity = SampleVelocity(MaterialParameters, LocalToWorld_Velocity);
+#endif
+	}
+
+	// Must execute for all threads since threads cooperatively write to bottom level grid
+	HVPT_AccumulatePropertiesInBottomLevelGrid(
+		GroupThreadId,
+		TopLevelGridLinearIndex,
+		TopLevelGridData,
+		BottomLevelVoxelResolution,
+		Extinction,
+		Emission,
+		Scattering,
+		Velocity
+	);
+}
+
+
+[numthreads(THREADGROUP_SIZE_3D,  THREADGROUP_SIZE_3D,  THREADGROUP_SIZE_3D)]
+void HVPT_RasterizeBottomLevelOrthoGridCS(
+	uint3 GroupId : SV_GroupID,
+	uint3 GroupThreadId : SV_GroupThreadID
+)
+{
+	uint RasterTileIndex = GetUnWrappedDispatchGroupId(GroupId);
+	if (RasterTileIndex >= RasterTileAllocatorBuffer[0])
+	{
+		return;
+	}
+
+	uint TopLevelGridLinearIndex = RasterTileBuffer[RasterTileIndex].TopLevelGridLinearIndex;
+	FHVPT_TopLevelGridData TopLevelGridData = RWTopLevelGridBuffer[TopLevelGridLinearIndex];
+	int3 BottomLevelVoxelResolution = GetBottomLevelVoxelResolution(TopLevelGridData);
+
+	uint3 TopLevelGridVoxelIndex = GetVoxelIndex(TopLevelGridLinearIndex, TopLevelGridResolution);
+	
+	float3 TopLevelGridVoxelWorldBoundsMin;
+	float3 TopLevelGridVoxelWorldBoundsMax;
+	CalcVoxelBounds(TopLevelGridVoxelIndex, TopLevelGridVoxelWorldBoundsMin, TopLevelGridVoxelWorldBoundsMax);
+	float3 TopLevelGridVoxelWorldBoundsExtent = TopLevelGridVoxelWorldBoundsMax - TopLevelGridVoxelWorldBoundsMin;
+
+	// Unwrap the 3D index as a 2D index
+	int2 BottomLevelVoxelIndexAs2D = int2(GroupThreadId.y * BottomLevelVoxelResolution.x + GroupThreadId.x, GroupThreadId.z);
+
+	float3 Jitter = 0.5;
+	if (bJitter)
+	{
+		Jitter.xy = BlueNoiseVec2(BottomLevelVoxelIndexAs2D, View.StateFrameIndex);
+		Jitter.z = BlueNoiseScalar(BottomLevelVoxelIndexAs2D, View.StateFrameIndex);
+	}
+
+	float3 Extinction = 0;
+	float3 Emission = 0;
+	float3 Scattering = 0;
+	float3 Velocity = 0;
+	if (all(GroupThreadId < BottomLevelVoxelResolution))
+	{
+		float3 UVW = float3(GroupThreadId + Jitter) / float3(BottomLevelVoxelResolution);
+
+		float3 WorldPosition = UVW * TopLevelGridVoxelWorldBoundsExtent + TopLevelGridVoxelWorldBoundsMin;
+		if (WorldPositionIntersectsPrimitive(WorldPosition))
+		{
+			// Setup evaluation context
+			FMaterialPixelParameters MaterialParameters = MakeInitializedMaterialPixelParameters();
+			MaterialParameters.PrimitiveId = PrimitiveId;
+			MaterialParameters.AbsoluteWorldPosition = DFPromote(WorldPosition);
+			MaterialParameters.LWCData.AbsoluteWorldPosition = WSPromote(WorldPosition);
+			// TODO: Add object centroid to LWC.ObjectWorldPosition
+			MaterialParameters.LWCData.LocalToWorld = WSPromote(LocalToWorld);
+			MaterialParameters.LWCData.WorldToLocal = WSPromoteInverse(WorldToLocal);
+
+			// Evaluate material graph
+			FPixelMaterialInputs PixelMaterialInputs;
+			CalcPixelMaterialInputs(MaterialParameters, PixelMaterialInputs);
+
+			// Extract volume rendering coefficients
+			Extinction = SampleExtinctionCoefficients(PixelMaterialInputs);
+			Emission = SampleEmissive(PixelMaterialInputs);
+			Scattering = SampleAlbedo(PixelMaterialInputs) * Extinction;
+#if DIM_ENABLE_VELOCITY
+			Velocity = SampleVelocity(MaterialParameters, LocalToWorld_Velocity);
+#endif
+		}
+	}
+
+	// Must execute for all threads since threads cooperatively write to bottom level grid
+	HVPT_AccumulatePropertiesInBottomLevelGrid(
+		GroupThreadId,
+		TopLevelGridLinearIndex,
+		TopLevelGridData,
+		BottomLevelVoxelResolution,
+		Extinction,
+		Emission,
+		Scattering,
+		Velocity
+	);
+}
+
+
+float4 ExponentialFogParameters;
+float4 ExponentialFogParameters2;
+float4 ExponentialFogParameters3;
+
+float4 GlobalAlbedo;
+float4 GlobalEmissive;
+float GlobalExtinctionScale;
+
+[numthreads(THREADGROUP_SIZE_3D, THREADGROUP_SIZE_3D, THREADGROUP_SIZE_3D)]
+void HVPT_RasterizeFogFrustumGridCS(
+	uint3 GroupId : SV_GroupID,
+	uint3 GroupThreadId : SV_GroupThreadID
+)
+{
+	uint RasterTileIndex = GetUnWrappedDispatchGroupId(GroupId);
+	if (RasterTileIndex >= RasterTileAllocatorBuffer[0])
+	{
+		return;
+	}
+
+	uint TopLevelGridLinearIndex = RasterTileBuffer[RasterTileIndex].TopLevelGridLinearIndex;
+	FHVPT_TopLevelGridData TopLevelGridData = RWTopLevelGridBuffer[TopLevelGridLinearIndex];
+	if (!IsBottomLevelAllocated(TopLevelGridData))
+	{
+		// We only want to populate previously allocated cells with fog - it's a waste of resources to allocate cells for only fog
+		// As a consequence, fog must be rasterized AFTER all heterogeneous volumes
+		return;
+	}
+
+	int3 BottomLevelVoxelResolution = GetBottomLevelVoxelResolution(TopLevelGridData);
+
+	// Setup evaluation context
+	float3 TopLevelVoxelPos = GetVoxelIndex(TopLevelGridLinearIndex, TopLevelGridResolution);
+	float3 BottomLevelVoxelPos = TopLevelVoxelPos * BottomLevelVoxelResolution + GroupThreadId;
+
+	float3 Jitter = 0.5;
+	if (bJitter)
+	{
+		Jitter.z = BlueNoiseScalar(BottomLevelVoxelPos.xy, View.StateFrameIndex);
+	}
+
+	float3 LocalVoxelPos = GroupThreadId + Jitter;
+	float3 VoxelPosition = TopLevelVoxelPos + LocalVoxelPos / BottomLevelVoxelResolution;
+
+	float3 ViewPos = VoxelToView(VoxelPosition, VoxelDimensions, NearPlaneDepth, FarPlaneDepth, TanHalfFOV);
+	float3 WorldPosition = mul(float4(ViewPos, 1), ViewToWorld).xyz;
+
+	// Calculate height fog at position
+	float GlobalDensityFirst = ExponentialFogParameters3.x * exp2(-ExponentialFogParameters.y * (WorldPosition.z - ExponentialFogParameters3.y));
+	float GlobalDensitySecond = ExponentialFogParameters2.z * exp2(-ExponentialFogParameters2.y * (WorldPosition.z - ExponentialFogParameters2.w));
+	float GlobalDensity = GlobalDensityFirst + GlobalDensitySecond;
+
+	const float MatchHeightFogFactor = .5f;
+	GlobalDensity *= MatchHeightFogFactor;
+
+	float3 Extinction = max(GlobalDensity * GlobalExtinctionScale, 0);
+	float3 Emission = GlobalEmissive.rgb;
+	float3 Scattering = GlobalAlbedo.rgb * Extinction;
+	float3 Velocity = 0.0f;
+
+	// Must execute for all threads since threads cooperatively write to bottom level grid
+	HVPT_AccumulatePropertiesInBottomLevelGrid(
+		GroupThreadId,
+		TopLevelGridLinearIndex,
+		TopLevelGridData,
+		BottomLevelVoxelResolution,
+		Extinction,
+		Emission,
+		Scattering,
+		Velocity
+	);
+}
+
+[numthreads(THREADGROUP_SIZE_3D, THREADGROUP_SIZE_3D, THREADGROUP_SIZE_3D)]
+void HVPT_RasterizeFogOrthoGridCS(
+	uint3 GroupId : SV_GroupID,
+	uint3 GroupThreadId : SV_GroupThreadID
+)
+{
+	uint RasterTileIndex = GetUnWrappedDispatchGroupId(GroupId);
+	if (RasterTileIndex >= RasterTileAllocatorBuffer[0])
+	{
+		return;
+	}
+
+	uint TopLevelGridLinearIndex = RasterTileBuffer[RasterTileIndex].TopLevelGridLinearIndex;
+	FHVPT_TopLevelGridData TopLevelGridData = RWTopLevelGridBuffer[TopLevelGridLinearIndex];
+	if (!IsBottomLevelAllocated(TopLevelGridData))
+	{
+		// We only want to populate previously allocated cells with fog - it's a waste of resources to allocate cells for only fog
+		// As a consequence, fog must be rasterized AFTER all heterogeneous volumes
+		return;
+	}
+
+	int3 BottomLevelVoxelResolution = GetBottomLevelVoxelResolution(TopLevelGridData);
+
+	uint3 TopLevelGridVoxelIndex = GetVoxelIndex(TopLevelGridLinearIndex, TopLevelGridResolution);
+	
+	float3 TopLevelGridVoxelWorldBoundsMin;
+	float3 TopLevelGridVoxelWorldBoundsMax;
+	CalcVoxelBounds(TopLevelGridVoxelIndex, TopLevelGridVoxelWorldBoundsMin, TopLevelGridVoxelWorldBoundsMax);
+	float3 TopLevelGridVoxelWorldBoundsExtent = TopLevelGridVoxelWorldBoundsMax - TopLevelGridVoxelWorldBoundsMin;
+
+	// Unwrap the 3D index as a 2D index
+	int2 BottomLevelVoxelIndexAs2D = int2(GroupThreadId.y * BottomLevelVoxelResolution.x + GroupThreadId.x, GroupThreadId.z);
+
+	float3 Jitter = 0.5;
+	if (bJitter)
+	{
+		Jitter.xy = BlueNoiseVec2(BottomLevelVoxelIndexAs2D, View.StateFrameIndex);
+		Jitter.z = BlueNoiseScalar(BottomLevelVoxelIndexAs2D, View.StateFrameIndex);
+	}
+
+	float3 Extinction = 0;
+	float3 Emission = 0;
+	float3 Scattering = 0;
+	float3 Velocity = 0;
+	if (all(GroupThreadId < BottomLevelVoxelResolution))
+	{
+		float3 UVW = float3(GroupThreadId + Jitter) / float3(BottomLevelVoxelResolution);
+		float3 WorldPosition = UVW * TopLevelGridVoxelWorldBoundsExtent + TopLevelGridVoxelWorldBoundsMin;
+
+		// Calculate height fog at position
+		float GlobalDensityFirst = ExponentialFogParameters3.x * exp2(-ExponentialFogParameters.y * (WorldPosition.z - ExponentialFogParameters3.y));
+		float GlobalDensitySecond = ExponentialFogParameters2.z * exp2(-ExponentialFogParameters2.y * (WorldPosition.z - ExponentialFogParameters2.w));
+		float GlobalDensity = GlobalDensityFirst + GlobalDensitySecond;
+
+		const float MatchHeightFogFactor = .5f;
+		GlobalDensity *= MatchHeightFogFactor;
+
+		Extinction = max(GlobalDensity * GlobalExtinctionScale, 0);
+		Emission = GlobalEmissive.rgb;
+		Scattering = GlobalAlbedo.rgb * Extinction;
+	}
+
+	// Must execute for all threads since threads cooperatively write to bottom level grid
+	HVPT_AccumulatePropertiesInBottomLevelGrid(
+		GroupThreadId,
+		TopLevelGridLinearIndex,
+		TopLevelGridData,
+		BottomLevelVoxelResolution,
+		Extinction,
+		Emission,
+		Scattering,
+		Velocity
+	);
+}

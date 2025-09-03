@@ -1,0 +1,87 @@
+
+#include "/Engine/Private/Common.ush"
+#include "/Engine/Private/HeightFogCommon.ush"
+#include "/Engine/Private/PositionReconstructionCommon.ush"
+
+#ifndef THREADGROUP_SIZE_2D
+#define THREADGROUP_SIZE_2D 1
+#endif
+
+Texture2D<float3> RadianceTexture;
+Texture2D<float2> FeatureTexture;
+RWTexture2D<float4> RWColorTexture;
+
+// Volumetric fog parameters
+int ApplyVolumetricFog;
+float VolumetricFogStartDistance;
+
+Texture3D IntegratedLightScattering;
+SamplerState IntegratedLightScatteringSampler;
+
+
+float4 HVPT_CombineVolumetricFog(float4 GlobalFog, uint2 PixelCoord, float SceneDepth, ViewState InView)
+{
+	float4 VolumetricFogLookup = float4(0, 0, 0, 1);
+
+	float VolFogStartDistance = 0.0f;
+	if (ApplyVolumetricFog > 0)
+	{
+		VolFogStartDistance = VolumetricFogStartDistance;
+
+		// Reconstruct world position from scene depth
+		float3 TranslatedWorldPosition = ReconstructTranslatedWorldPositionFromDeviceZ(PixelCoord, ConvertToDeviceZ(SceneDepth));
+
+		float3 VolumeUV = ComputeVolumeUV(DFPromote(TranslatedWorldPosition), DFPromoteInverse(InView.TranslatedWorldToClip));
+		VolumetricFogLookup = Texture3DSampleLevel(IntegratedLightScattering, IntegratedLightScatteringSampler, VolumeUV, 0);
+
+		// IntegratedLightScattering is pre-exposed, remove pre exposure now so that it can correctly be applied later
+		VolumetricFogLookup.rgb *= InView.OneOverPreExposure;
+	}
+
+	// Do not apply the Froxel volumetric texture in front of the fog start distance. (the soft fading occur in FinalIntegrationCS).
+	// We go with a quickly increasing step function because the soft fade in from start distance occurs in FinalIntegrationCS.
+	VolumetricFogLookup = lerp(float4(0, 0, 0, 1), VolumetricFogLookup, saturate((SceneDepth - VolFogStartDistance) * 100000000.0f));
+
+	return float4(VolumetricFogLookup.rgb + GlobalFog.rgb * VolumetricFogLookup.a, VolumetricFogLookup.a * GlobalFog.a);
+}
+
+float4 HVPT_CombineVolumetricFog(float4 GlobalFog, uint2 PixelCoord, float SceneDepth)
+{
+	return HVPT_CombineVolumetricFog(GlobalFog, PixelCoord, SceneDepth, GetPrimaryView());
+}
+
+
+[numthreads(THREADGROUP_SIZE_2D, THREADGROUP_SIZE_2D, 1)]
+void HVPT_CompositeCS(
+	uint2 DispatchThreadId : SV_DispatchThreadID
+)
+{
+	if (any(DispatchThreadId.xy >= View.ViewSizeAndInvSize.xy))
+	{
+		return;
+	}
+	uint2 PixelCoord = DispatchThreadId.xy + View.ViewRectMin.xy;
+
+	float4 PrevColour = RWColorTexture[PixelCoord];
+
+	float4 Result;
+    float3 Radiance = RadianceTexture[PixelCoord];
+	float2 Features = FeatureTexture[PixelCoord];
+	
+	if (Features.y == 0.0f)
+	{
+		return;
+	}
+
+	float4 Fogging = float4(Radiance, Features.x);
+
+#if APPLY_VOLUMETRIC_FOG
+	// Sample depth of first interaction with Heterogeneous volumes
+	Fogging = HVPT_CombineVolumetricFog(Fogging, PixelCoord, Features.y);
+#endif
+
+	Result.rgb = Fogging.rgb + PrevColour.rgb * Fogging.a;
+	Result.a = PrevColour.a * Fogging.a;
+
+	RWColorTexture[PixelCoord] = Result;
+}
