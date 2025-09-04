@@ -5,6 +5,10 @@
 
 #include "../Utils/PathTracingUtils.ush"
 
+#ifndef MULTIPLE_BOUNCES
+#define MULTIPLE_BOUNCES true
+#endif
+
 
 RaytracingAccelerationStructure TLAS;
 
@@ -20,7 +24,7 @@ uint HVPT_GetReservoirIndex(uint2 PixelCoord)
 	return PixelCoord.y * View.ViewSizeAndInvSize.x + PixelCoord.x;
 }
 
-uint HVPT_GetExtraBounceIndex(uint2 PixelCoord, uint Bounce)
+uint HVPT_GetExtraBounceIndex(uint2 PixelCoord, uint Bounce = 0)
 {
 	return (HVPT_GetReservoirIndex(PixelCoord) * (NumBounces - 1)) + Bounce;
 }
@@ -99,6 +103,57 @@ bool HVPT_CombineReservoirs(inout FHVPT_Reservoir Reservoir, FHVPT_Reservoir r_i
 	}
 
 	return false;
+}
+
+
+FHVPT_Reservoir HVPT_CreateNewReservoir()
+{
+	FHVPT_Reservoir OutReservoir = (FHVPT_Reservoir)0;
+	OutReservoir.RunningSum = 0.0f;
+	OutReservoir.M = 0.0f;
+	OutReservoir.P_y = 0.0f;
+	OutReservoir.bEmissionPath = false;
+	OutReservoir.Depth = POSITIVE_INFINITY;
+	OutReservoir.LightId = -1;
+	OutReservoir.LightSample = 0.0f;
+	OutReservoir.NumExtraBounces = 0;
+	OutReservoir.SampledPixel = 0;
+	return OutReservoir;
+}
+
+template<bool bThresholdM>
+bool HVPT_SimpleResampleStep(FHVPT_Reservoir Reservoir, inout FHVPT_Reservoir State, float RandValue, float MThreshold = 0.0f)
+{
+	float CorrectedM, SampleWeight;
+	if (bThresholdM)
+	{
+		CorrectedM = min(MThreshold, Reservoir.M);
+		SampleWeight = CorrectedM == 0.0f ? 0.0f : CorrectedM / Reservoir.M * Reservoir.RunningSum;
+	}
+	else
+	{
+		CorrectedM = Reservoir.M;
+		SampleWeight = Reservoir.RunningSum;
+	}
+	
+    State.M += CorrectedM;
+    if (SampleWeight <= 0.0f) return false;
+
+    // Update the weight
+	State.RunningSum += SampleWeight;
+
+	bool bSelectSample = RandValue * State.RunningSum < SampleWeight;
+
+    // If we did select this sample, update the relevant data
+	State.P_y			  = bSelectSample ? Reservoir.P_y			  : State.P_y;
+	State.bEmissionPath   =	bSelectSample ? Reservoir.bEmissionPath	  : State.bEmissionPath;
+	State.Depth			  =	bSelectSample ? Reservoir.Depth			  : State.Depth;
+	State.LightId		  =	bSelectSample ? Reservoir.LightId		  : State.LightId;
+	State.LightSample	  =	bSelectSample ? Reservoir.LightSample	  : State.LightSample;
+	State.NumExtraBounces = bSelectSample ? Reservoir.NumExtraBounces : State.NumExtraBounces;
+	State.SampledPixel	  =	bSelectSample ? Reservoir.SampledPixel	  : State.SampledPixel;
+
+    return bSelectSample;
 }
 
 #endif

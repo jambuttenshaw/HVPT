@@ -77,8 +77,7 @@ bool HVPT_IsShadowed(float3 Origin, float3 Direction, float TMin, float TMax)
 	return Payload.IsHit();
 }
 
-template<
-bool bIsFinalShading>
+template<bool bIsFinalShading>
 float3 HVPT_CalculateLightVisibility(float3 TranslatedWorldPos, FLightSample LightSample, inout RandomSequence RandSequence)
 {
 	float3 ScatteringVisibility = 1.0f;
@@ -101,7 +100,7 @@ float3 HVPT_CalculateLightVisibility(float3 TranslatedWorldPos, FLightSample Lig
 		LightRay.TMax = VolumeIntersection.VolumeTMax;
 
 		bool bEscaped = false;
-		ScatteringVisibility = HVPT_CalculateTransmittance < bIsFinalShading > (LightRay, RandSequence, bEscaped);
+		ScatteringVisibility = HVPT_CalculateTransmittance<bIsFinalShading>(LightRay, RandSequence, bEscaped);
 
 #if APPLY_VOLUMETRIC_FOG
 		if (bEscaped)

@@ -32,12 +32,10 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRFinalShadingRGS)
 	if (Reservoir.RunningSum > 0.0f)
 	{
 		FRayDesc Ray = HVPT_CreateRayDesc(PixelCoord);
-		Ray.TMax = Reservoir.Depth;
 
 		// Ray must be bounded by the HV AABB for tracking to work correctly
 		FVolumeIntersection VolIntersect = HVPT_Intersect(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
 		Ray.TMin = VolIntersect.VolumeTMin;
-		Ray.TMax = VolIntersect.VolumeTMax;
 		// If RunningSum > 0, then this ray MUST have intersected with the volume AABB.
 
 		RandomSequence RandSequence = (RandomSequence)0;
@@ -60,7 +58,15 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRFinalShadingRGS)
 			Ray, RandSequence);
 
 		float W = Reservoir.P_y == 0.0 ? 1.f : Reservoir.RunningSum / (Reservoir.P_y * Reservoir.M);
+
 		Radiance *= W;
+	}
+
+	if ((isnan(Radiance.r) || isinf(Radiance.r)) ||
+        (isnan(Radiance.g) || isinf(Radiance.g)) ||
+        (isnan(Radiance.b) || isinf(Radiance.b)))
+	{
+		Radiance = 0.0f;
 	}
 
 	// Transmittance is calculated separately
