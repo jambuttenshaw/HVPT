@@ -1,0 +1,168 @@
+
+// This needs to be first for generated uniform buffer ush to compile
+#include "../VoxelGrid/VoxelGridTypes.ush"
+
+#include "/Engine/Private/Common.ush"
+#include "../../Shared/HVPTDefinitions.h"
+
+#include "ReSTIRUtils.ush"
+#include "PathEvaluation.ush"
+
+#ifndef MULTIPLE_BOUNCES
+#define MULTIPLE_BOUNCES true
+#endif
+
+#ifndef MAX_SPATIAL_SAMPLES
+#define MAX_SPATIAL_SAMPLES 8
+#endif
+
+
+Texture2D<float> SceneDepthTexture;
+
+uint TemporalSeed;
+
+uint NumSpatialSamples;
+float SpatialReuseRadius;
+
+StructuredBuffer<FHVPT_Reservoir> InReservoirs;
+StructuredBuffer<FHVPT_Bounce> InExtraBounces;
+
+RWStructuredBuffer<FHVPT_Reservoir> RWOutReservoirs;
+RWStructuredBuffer<FHVPT_Bounce> RWOutExtraBounces;
+
+
+int2 GenerateNeighbourhoodOffset(inout RandomSequence RandSequence)
+{
+	float2 RandValue = RandomSequence_GenerateSample2D(RandSequence);
+	return SpatialReuseRadius * UniformSampleDisk(RandValue);
+}
+
+#if MULTIPLE_BOUNCES
+void LoadExtraBounces(uint2 PixelCoord, uint NumExtraBounces, inout FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES])
+{
+	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(PixelCoord, 0);
+	for (uint Bounce = 0; Bounce < NumExtraBounces; Bounce++)
+	{
+		Bounces[Bounce] = InExtraBounces[ExtraBounceIndex + Bounce];
+	}
+}
+#endif
+
+
+RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
+{
+	uint2 PixelCoord = DispatchRaysIndex().xy;
+
+	// Create an empty reservoir to hold the selected path
+	FHVPT_Reservoir OutReservoir = (FHVPT_Reservoir)0;
+	uint ExtraBounceIndex = -1;
+#if MULTIPLE_BOUNCES
+	FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES];
+#endif
+
+	// Load current reservoir
+	uint LinearPixelIndex = HVPT_GetReservoirIndex(PixelCoord);
+
+	RandomSequence RandSequence = (RandomSequence)0;
+	RandomSequence_Initialize(RandSequence, LinearPixelIndex, TemporalSeed);
+
+	FRayDesc CanonicalRay = HVPT_CreateRayDesc(PixelCoord);
+
+	// Including canonical
+	const uint TotalNumSamples = NumSpatialSamples + 1;
+	uint2 Domains[MAX_SPATIAL_SAMPLES + 1];
+	Domains[0] = PixelCoord;
+	uint Count = 1;
+	for (uint i = 1; i < TotalNumSamples; i++)
+	{
+		uint2 Domain = (uint2)((int2)PixelCoord + GenerateNeighbourhoodOffset(RandSequence));
+		if (all(Domain >= 0) && all(Domains[i] < DispatchRaysDimensions().xy))
+		{
+			Domains[Count++] = Domain;
+		}
+	}
+
+	// Perform spatial reuse
+	for (uint i = 0; i < Count; i++)
+	{
+		FHVPT_Reservoir r_i = InReservoirs[HVPT_GetReservoirIndex(Domains[i])];
+#if MULTIPLE_BOUNCES
+		LoadExtraBounces(Domains[i], r_i.NumExtraBounces, Bounces);
+#endif
+
+		float p_sum = 0.0f;
+		float k = 0.0f;
+
+		if (i > 0)
+		{
+			r_i.P_y = Luminance(HVPT_EvaluateF<false>(r_i,
+#if MULTIPLE_BOUNCES
+				Bounces,
+#endif
+				CanonicalRay, RandSequence));
+
+			if (isnan(r_i.P_y) || isinf(r_i.P_y))
+				r_i.P_y = 0.0f;
+		}
+
+		// Compute MIS weight
+		for (uint s = 0; s < TotalNumSamples; s++)
+		{
+			int2 q_s = Domains[s];
+
+			FHVPT_Reservoir r_s = InReservoirs[HVPT_GetReservoirIndex(q_s)];
+
+			float p_hat_qi;
+			if (s == 0)
+			{
+				p_hat_qi = r_i.P_y;
+			}
+			else if (s == i)
+			{
+				p_hat_qi = r_s.P_y;
+			}
+			else
+			{
+				FRayDesc Ray = (FRayDesc)0;
+				Ray.Origin = CanonicalRay.Origin;
+				Ray.Direction = HVPT_GetRayDirection(q_s);
+
+				p_hat_qi = Luminance(HVPT_EvaluateF<false>(r_i,
+#if MULTIPLE_BOUNCES
+					Bounces,
+#endif
+					Ray, RandSequence));
+
+				if (isnan(p_hat_qi) || isinf(p_hat_qi))
+					p_hat_qi = 0.0f;
+			}
+
+			p_sum += p_hat_qi * r_s.M;
+			k += r_s.M;
+		}
+
+		float m = (p_sum > 0.0f) ? (r_i.P_y * k) / p_sum : 1.0f; // MIS weight
+
+		if (HVPT_CombineReservoirs(OutReservoir, r_i, r_i.P_y, m, RandomSequence_GenerateSample1D(RandSequence)))
+		{
+			OutReservoir.bEmissionPath = r_i.bEmissionPath;
+			OutReservoir.NumExtraBounces = r_i.NumExtraBounces;
+			OutReservoir.Depth = r_i.Depth;
+			OutReservoir.LightId = r_i.LightId;
+			OutReservoir.LightSample = r_i.LightSample;
+
+			ExtraBounceIndex = HVPT_GetExtraBounceIndex(Domains[i], 0);
+		}
+	}
+
+	RWOutReservoirs[LinearPixelIndex] = OutReservoir;
+
+#if MULTIPLE_BOUNCES
+	// NumExtraBounces will be 0 if no sample was selected
+	uint OutExtraBounceIndex = HVPT_GetExtraBounceIndex(PixelCoord, 0);
+	for (uint Bounce = 0; Bounce < OutReservoir.NumExtraBounces; Bounce++)
+	{
+		RWOutExtraBounces[OutExtraBounceIndex + Bounce] = InExtraBounces[ExtraBounceIndex + Bounce];
+	}
+#endif
+}

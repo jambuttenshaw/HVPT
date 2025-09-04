@@ -1,0 +1,33 @@
+#ifndef RESAMPLING_H
+#define RESAMPLING_H
+
+#include "ReSTIRUtils.ush"
+#include "PathEvaluation.ush"
+
+void HVPT_ResampleNeighbour(
+	inout FHVPT_Reservoir Tap,
+#if MULTIPLE_BOUNCES
+	FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES],
+#endif
+	FRayDesc Ray, 
+	inout RandomSequence RandSequence)
+{
+	if (Tap.RunningSum == 0.0f)
+		return;
+
+	float P_y_hat = Luminance(HVPT_EvaluateF<false>(Tap,
+#if MULTIPLE_BOUNCES
+			Bounces,
+#endif
+			Ray,
+			RandSequence));
+
+	float Weight = P_y_hat / Tap.P_y;
+	if (isinf(Weight) || isnan(Weight))
+		Weight = 0.0f;
+
+	Tap.RunningSum *= Weight;
+	Tap.P_y = P_y_hat;
+}
+
+#endif

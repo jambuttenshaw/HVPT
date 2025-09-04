@@ -1,0 +1,188 @@
+
+// This needs to be first for generated uniform buffer ush to compile
+#include "../VoxelGrid/VoxelGridTypes.ush"
+
+#include "/Engine/Private/Common.ush"
+#include "../../Shared/HVPTDefinitions.h"
+
+#include "ReSTIRUtils.ush"
+#include "PathEvaluation.ush"
+
+#ifndef MULTIPLE_BOUNCES
+#define MULTIPLE_BOUNCES true
+#endif
+
+
+Texture2D<float> SceneDepthTexture;
+Texture2D<float4> GBufferVelocityTexture;
+
+uint TemporalSeed;
+
+
+StructuredBuffer<FHVPT_Reservoir> PreviousReservoirs;
+StructuredBuffer<FHVPT_Bounce> PreviousExtraBounces;
+
+RWStructuredBuffer<FHVPT_Reservoir> RWCurrentReservoirs;
+RWStructuredBuffer<FHVPT_Bounce> RWCurrentExtraBounces;
+
+
+RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
+{
+	uint2 PixelCoord = DispatchRaysIndex().xy;
+	uint LinearPixelIndex = HVPT_GetReservoirIndex(PixelCoord);
+
+	RandomSequence RandSequence = (RandomSequence)0;
+	RandomSequence_Initialize(RandSequence, LinearPixelIndex, TemporalSeed);
+
+	FRayDesc CanonicalRay = HVPT_CreateRayDesc(PixelCoord);
+
+	// Resample from 2 input samples
+	uint2 Domains[2];
+	FHVPT_Reservoir Reservoirs[2];
+
+	Domains[0] = PixelCoord;
+	Reservoirs[0] = RWCurrentReservoirs[LinearPixelIndex];
+	uint NumReservoirs = 1;
+
+	// Temporal reprojection to find a reservoir to resample
+	if (false /*enable reprojection*/)
+	{
+		
+	}
+	else
+	{
+		// Fallback reservoirs
+		Domains[1] = PixelCoord;
+		Reservoirs[1] = PreviousReservoirs[LinearPixelIndex];
+		NumReservoirs++;
+	}
+
+	float MaxPrevM = /*gTemporalHistoryThreshold=*/4 * Reservoirs[0].M;
+
+	// Convert reservoir depths to this-frame depths
+
+
+	// Perform resampling
+	FHVPT_Reservoir OutReservoir = (FHVPT_Reservoir)0;
+	uint ExtraBounceIndex = 0;
+	uint SelectedID = 0;
+
+#if MULTIPLE_BOUNCES
+	FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES];
+#endif
+
+	for (uint i = 0; i < NumReservoirs; i++)
+	{
+		FHVPT_Reservoir r_i = Reservoirs[i];
+#if MULTIPLE_BOUNCES
+		uint InExtraBounceIndex = HVPT_GetExtraBounceIndex(Domains[i], 0);
+		for (uint Bounce = 0; Bounce < r_i.NumExtraBounces; Bounce++)
+		{
+			if (i == 0)
+			{
+				Bounces[Bounce] = RWCurrentExtraBounces[InExtraBounceIndex + Bounce];
+			}
+			else
+			{
+				Bounces[Bounce] = PreviousExtraBounces[InExtraBounceIndex + Bounce];
+			}
+		}
+#endif
+
+		float p_sum = 0.0f;
+		float k = 0.0f;
+
+		if (r_i.P_y > 0)
+		{
+			if (i > 0)
+			{
+				r_i.P_y = Luminance(HVPT_EvaluateF<false>(r_i,
+#if MULTIPLE_BOUNCES
+					Bounces,
+#endif
+					CanonicalRay, RandSequence));
+
+				if (isnan(r_i.P_y) || isinf(r_i.P_y))
+					r_i.P_y = 0.0f;
+			}
+		}
+		else
+		{
+			r_i.P_y = 0.0f;
+			r_i.RunningSum = 0.0f;
+		}
+
+		// Compute MIS weight
+		if (false)
+		for (uint s = 0; s < NumReservoirs; s++)
+		{
+			int2 q_s = Domains[s];
+
+			FHVPT_Reservoir r_s = Reservoirs[s];
+
+			float p_hat_qi;
+			if (s == 0)
+			{
+				p_hat_qi = r_i.P_y;
+			}
+			else if (s == i)
+			{
+				p_hat_qi = r_s.P_y;
+			}
+			else
+			{
+				FRayDesc Ray = (FRayDesc)0;
+				Ray.Origin = CanonicalRay.Origin;
+				Ray.Direction = HVPT_GetRayDirection(q_s);
+
+				p_hat_qi = Luminance(HVPT_EvaluateF<false>(r_i,
+#if MULTIPLE_BOUNCES
+					Bounces,
+#endif
+					Ray, RandSequence));
+
+				if (isnan(p_hat_qi) || isinf(p_hat_qi))
+					p_hat_qi = 0.0f;
+			}
+
+			float CorrectedM = min(MaxPrevM, r_s.M);
+			p_sum += p_hat_qi * CorrectedM;
+			k += CorrectedM;
+		}
+
+		float m = (p_sum > 0.0f) ? (r_i.P_y * k) / p_sum : 1.0f; // MIS weight
+
+		if (HVPT_CombineReservoirs<true>(OutReservoir, r_i, r_i.P_y, m, RandomSequence_GenerateSample1D(RandSequence), MaxPrevM))
+		{
+			OutReservoir.bEmissionPath = r_i.bEmissionPath;
+			OutReservoir.NumExtraBounces = r_i.NumExtraBounces;
+			OutReservoir.Depth = r_i.Depth;
+			OutReservoir.LightId = r_i.LightId;
+			OutReservoir.LightSample = r_i.LightSample;
+
+			ExtraBounceIndex = HVPT_GetExtraBounceIndex(Domains[i], 0);
+			SelectedID = i; // To be able to know whether to copy extra bounces from this frames buffer or previous frame buffer
+		}
+	}
+
+	// Output reservoir
+	RWCurrentReservoirs[LinearPixelIndex] = OutReservoir;
+
+#if MULTIPLE_BOUNCES
+	uint OutExtraBounceIndex = HVPT_GetExtraBounceIndex(PixelCoord, 0);
+	// NumExtraBounces will be 0 if no sample was selected
+	for (uint Bounce = 0; Bounce < OutReservoir.NumExtraBounces; Bounce++)
+	{
+		// TODO: If SelectedID is 0, do we need to copy extra bounces at all?
+		// TODO: I would assume that OutExtraBounceIndex == ExtraBounceIndex?
+		if (SelectedID == 0)
+		{
+			RWCurrentExtraBounces[OutExtraBounceIndex + Bounce] = RWCurrentExtraBounces[ExtraBounceIndex + Bounce];
+		}
+		else
+		{
+			RWCurrentExtraBounces[OutExtraBounceIndex + Bounce] = PreviousExtraBounces[ExtraBounceIndex + Bounce];
+		}
+	}
+#endif
+}

@@ -7,6 +7,7 @@
 
 #include "ReSTIRUtils.ush"
 #include "PathEvaluation.ush"
+#include "Resampling.ush"
 
 #ifndef MULTIPLE_BOUNCES
 #define MULTIPLE_BOUNCES true
@@ -24,12 +25,18 @@ uint TemporalSeed;
 uint NumSpatialSamples;
 float SpatialReuseRadius;
 
+Texture2D<float2> FeatureTexture;
+
 StructuredBuffer<FHVPT_Reservoir> InReservoirs;
 StructuredBuffer<FHVPT_Bounce> InExtraBounces;
 
 RWStructuredBuffer<FHVPT_Reservoir> RWOutReservoirs;
 RWStructuredBuffer<FHVPT_Bounce> RWOutExtraBounces;
 
+bool IsWithinRange(int2 pos, uint2 range)
+{
+	return all(pos >= 0) && all(pos < range);
+}
 
 int2 GenerateNeighbourhoodOffset(inout RandomSequence RandSequence)
 {
@@ -46,6 +53,15 @@ void LoadExtraBounces(uint2 PixelCoord, uint NumExtraBounces, inout FHVPT_Bounce
 		Bounces[Bounce] = InExtraBounces[ExtraBounceIndex + Bounce];
 	}
 }
+
+void WriteExtraBounces(uint2 PixelCoord, uint NumExtraBounces, FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES])
+{
+	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(PixelCoord, 0);
+	for (uint Bounce = 0; Bounce < NumExtraBounces; Bounce++)
+	{
+		RWOutExtraBounces[ExtraBounceIndex + Bounce] = Bounces[Bounce];
+	}
+}
 #endif
 
 
@@ -54,8 +70,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 	uint2 PixelCoord = DispatchRaysIndex().xy;
 
 	// Create an empty reservoir to hold the selected path
-	FHVPT_Reservoir OutReservoir = (FHVPT_Reservoir)0;
-	uint ExtraBounceIndex = -1;
+	FHVPT_Reservoir OutReservoir = HVPT_CreateNewReservoir();
 #if MULTIPLE_BOUNCES
 	FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES];
 #endif
@@ -68,101 +83,122 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 
 	FRayDesc CanonicalRay = HVPT_CreateRayDesc(PixelCoord);
 
+	bool bHasSelection = false;
+
+	// Check if pixel should have any volume radiance at all
+	if (FeatureTexture[PixelCoord].r == 1.0f)
+	{
+		OutReservoir = InReservoirs[LinearPixelIndex];
+		RWOutReservoirs[LinearPixelIndex] = OutReservoir;
+#if MULTIPLE_BOUNCES
+		LoadExtraBounces(PixelCoord, OutReservoir.NumExtraBounces, Bounces);
+		WriteExtraBounces(PixelCoord, OutReservoir.NumExtraBounces, Bounces);
+#endif
+		return;
+	}
+
 	// Including canonical
-	const uint TotalNumSamples = NumSpatialSamples + 1;
-	uint2 Domains[MAX_SPATIAL_SAMPLES + 1];
-	Domains[0] = PixelCoord;
-	uint Count = 1;
-	for (uint i = 1; i < TotalNumSamples; i++)
+	uint TotalSampleCount = NumSpatialSamples + 1;
+	int2 Offsets[MAX_SPATIAL_SAMPLES + 1];
+	Offsets[0] = 0;
+
+	// Generate offsets
+	for (uint i = 1; i < TotalSampleCount; i++)
 	{
-		uint2 Domain = (uint2)((int2)PixelCoord + GenerateNeighbourhoodOffset(RandSequence));
-		if (all(Domain >= 0) && all(Domains[i] < DispatchRaysDimensions().xy))
+		Offsets[i] = GenerateNeighbourhoodOffset(RandSequence);
+	}
+
+	for (uint i = 0; i < TotalSampleCount; i++)
+	{
+		int2 Offset = Offsets[i];
+		int2 TapPos = (int2)PixelCoord + Offset;
+		if (IsWithinRange(TapPos, (uint2)View.ViewSizeAndInvSize.xy))
 		{
-			Domains[Count++] = Domain;
+			FHVPT_Reservoir Tap = InReservoirs[HVPT_GetReservoirIndex((uint2)TapPos)];
+
+			float MISWeight = 1.0f;
+			float Neighbour_Py = Tap.P_y;
+
+			if (i > 0) // Don't resample canonical - its already in this domain
+			{
+#if MULTIPLE_BOUNCES
+				LoadExtraBounces(Tap.SampledPixel, Tap.NumExtraBounces, Bounces);
+#endif
+				HVPT_ResampleNeighbour(Tap, 
+#if MULTIPLE_BOUNCES
+					Bounces, 
+#endif
+					CanonicalRay, RandSequence);
+			}
+
+			if (Tap.RunningSum > 0.0f)
+			{
+				float PSum = 0.0f;
+				float PQi = 0.0f;
+				float K = 0.0f;
+
+				for (int j = 0; j < TotalSampleCount; j++)
+				{
+					int2 Offset_j = Offsets[j];
+					int2 TapPos_j = (int2)PixelCoord + Offset_j;
+
+					if (!IsWithinRange(TapPos_j, View.ViewSizeAndInvSize.xy))
+						continue;
+
+					FHVPT_Reservoir Tap_j = InReservoirs[HVPT_GetReservoirIndex((uint2)TapPos_j)];
+
+					K += Tap_j.M;
+
+					if (j == 0)
+					{
+						PQi += Tap.P_y;
+						PSum += Tap.P_y * Tap_j.M;
+					}
+					else if (i == j)
+					{
+						PQi = Tap_j.P_y;
+						PSum += Tap_j.P_y * Tap_j.M;
+					}
+					else
+					{
+						FRayDesc NeighbourRay = (FRayDesc)0;
+						NeighbourRay.Origin = CanonicalRay.Origin;
+						NeighbourRay.Direction = HVPT_GetRayDirection(TapPos_j);
+
+						float P_y = Luminance(HVPT_EvaluateF<false>(Tap,
+#if MULTIPLE_BOUNCES
+							Bounces,
+#endif
+							NeighbourRay,
+							RandSequence));
+						if (isinf(P_y) || isnan(P_y))
+							P_y = 0.0f;
+
+						PSum += P_y * Tap_j.M;
+					}
+				}
+
+				if (PSum > 0.0f)
+					MISWeight = PQi * K / PSum;
+			}
+
+			Tap.RunningSum *= MISWeight;
+			bHasSelection |= HVPT_SimpleResampleStep<false>(Tap, OutReservoir, RandomSequence_GenerateSample1D(RandSequence));
 		}
 	}
 
-	// Perform spatial reuse
-	for (uint i = 0; i < Count; i++)
-	{
-		FHVPT_Reservoir r_i = InReservoirs[HVPT_GetReservoirIndex(Domains[i])];
-#if MULTIPLE_BOUNCES
-		LoadExtraBounces(Domains[i], r_i.NumExtraBounces, Bounces);
-#endif
-
-		float p_sum = 0.0f;
-		float k = 0.0f;
-
-		if (i > 0)
-		{
-			r_i.P_y = Luminance(HVPT_EvaluateF<false>(r_i,
-#if MULTIPLE_BOUNCES
-				Bounces,
-#endif
-				CanonicalRay, RandSequence));
-
-			if (isnan(r_i.P_y) || isinf(r_i.P_y))
-				r_i.P_y = 0.0f;
-		}
-
-		// Compute MIS weight
-		for (uint s = 0; s < TotalNumSamples; s++)
-		{
-			int2 q_s = Domains[s];
-
-			FHVPT_Reservoir r_s = InReservoirs[HVPT_GetReservoirIndex(q_s)];
-
-			float p_hat_qi;
-			if (s == 0)
-			{
-				p_hat_qi = r_i.P_y;
-			}
-			else if (s == i)
-			{
-				p_hat_qi = r_s.P_y;
-			}
-			else
-			{
-				FRayDesc Ray = (FRayDesc)0;
-				Ray.Origin = CanonicalRay.Origin;
-				Ray.Direction = HVPT_GetRayDirection(q_s);
-
-				p_hat_qi = Luminance(HVPT_EvaluateF<false>(r_i,
-#if MULTIPLE_BOUNCES
-					Bounces,
-#endif
-					Ray, RandSequence));
-
-				if (isnan(p_hat_qi) || isinf(p_hat_qi))
-					p_hat_qi = 0.0f;
-			}
-
-			p_sum += p_hat_qi * r_s.M;
-			k += r_s.M;
-		}
-
-		float m = (p_sum > 0.0f) ? (r_i.P_y * k) / p_sum : 1.0f; // MIS weight
-
-		if (HVPT_CombineReservoirs(OutReservoir, r_i, r_i.P_y, m, RandomSequence_GenerateSample1D(RandSequence)))
-		{
-			OutReservoir.bEmissionPath = r_i.bEmissionPath;
-			OutReservoir.NumExtraBounces = r_i.NumExtraBounces;
-			OutReservoir.Depth = r_i.Depth;
-			OutReservoir.LightId = r_i.LightId;
-			OutReservoir.LightSample = r_i.LightSample;
-
-			ExtraBounceIndex = HVPT_GetExtraBounceIndex(Domains[i], 0);
-		}
-	}
-
+	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(OutReservoir.SampledPixel);
+	OutReservoir.SampledPixel = PixelCoord;
 	RWOutReservoirs[LinearPixelIndex] = OutReservoir;
 
 #if MULTIPLE_BOUNCES
-	// NumExtraBounces will be 0 if no sample was selected
-	uint OutExtraBounceIndex = HVPT_GetExtraBounceIndex(PixelCoord, 0);
-	for (uint Bounce = 0; Bounce < OutReservoir.NumExtraBounces; Bounce++)
+	if (bHasSelection)
 	{
-		RWOutExtraBounces[OutExtraBounceIndex + Bounce] = InExtraBounces[ExtraBounceIndex + Bounce];
+		uint OutExtraBounceIndex = HVPT_GetExtraBounceIndex(PixelCoord, 0);
+		for (uint Bounce = 0; Bounce < OutReservoir.NumExtraBounces; Bounce++)
+		{
+			RWOutExtraBounces[OutExtraBounceIndex + Bounce] = InExtraBounces[ExtraBounceIndex + Bounce];
+		}
 	}
 #endif
 }

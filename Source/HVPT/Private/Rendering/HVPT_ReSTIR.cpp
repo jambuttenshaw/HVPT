@@ -140,6 +140,8 @@ public:
 		SHADER_PARAMETER(uint32, NumSpatialSamples)
 		SHADER_PARAMETER(float, SpatialReuseRadius)
 
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float2>, FeatureTexture)
+
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Reservoir>, InReservoirs)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Bounce>, InExtraBounces)
 
@@ -382,6 +384,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 		PassParameters->NumSpatialSamples = FMath::Clamp(HVPT::GetNumSpatialReuseSamples(), 0, kReSTIRMaxSpatialSamples);
 		PassParameters->SpatialReuseRadius = HVPT::GetSpatialReuseRadius();
+
+		PassParameters->FeatureTexture = GraphBuilder.CreateSRV(State.FeatureTexture);
 
 		PassParameters->InReservoirs = GraphBuilder.CreateSRV(ReservoirsA);
 		PassParameters->InExtraBounces = GraphBuilder.CreateSRV(ExtraBouncesA);

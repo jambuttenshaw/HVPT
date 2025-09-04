@@ -444,6 +444,10 @@ FHVPT_Reservoir FinalReservoir = HVPT_CreateNewReservoir();
 		}
 	} // For each initial candidate
 
+	// Store the sampled pixel in the reservoir, this is used to later retrieve its extra bounces
+	// TODO: Can be converted to a 1D index into extra bounce index?
+	FinalReservoir.SampledPixel = PixelCoord;
+
 	// Evaluate PHat
 	if (FinalReservoir.RunningSum > 0.0f)
 	{
