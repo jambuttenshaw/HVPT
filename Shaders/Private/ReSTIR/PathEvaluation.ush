@@ -144,7 +144,7 @@ float3 HVPT_EvaluateF(
 
 	// Calculate visibility along primary ray
 	bool Dummy;
-	F *= HVPT_CalculateTransmittance < bIsFinalShading > (Ray, RandSequence, Dummy);
+	F *= HVPT_CalculateTransmittance<bIsFinalShading>(Ray, RandSequence, Dummy);
 
 	if (!any(F > 0.0f))
 	{

@@ -118,6 +118,8 @@ public:
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
 
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float2>, FeatureTexture)
+
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Reservoir>, PreviousReservoirs)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Bounce>, PreviousExtraBounces)
 
@@ -359,6 +361,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 		FReSTIRTemporalReuseRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRTemporalReuseRGS::FParameters>();
 		PopulateCommonParameters(&PassParameters->Common, 1);
+
+		PassParameters->FeatureTexture = GraphBuilder.CreateSRV(State.FeatureTexture);
 
 		PassParameters->PreviousReservoirs = GraphBuilder.CreateSRV(ReservoirsB);
 		PassParameters->PreviousExtraBounces = GraphBuilder.CreateSRV(ExtraBouncesB);
