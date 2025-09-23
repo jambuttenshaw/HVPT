@@ -17,6 +17,10 @@
 #define MAX_SPATIAL_SAMPLES 8
 #endif
 
+#ifndef ENABLE_TALBOT_MIS
+#define ENABLE_TALBOT_MIS true
+#endif
+
 
 Texture2D<float> SceneDepthTexture;
 
@@ -83,8 +87,6 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 
 	FRayDesc CanonicalRay = HVPT_CreateRayDesc(PixelCoord);
 
-	bool bHasSelection = false;
-
 	// Check if pixel should have any volume radiance at all
 	if (FeatureTexture[PixelCoord].r == 1.0f)
 	{
@@ -117,7 +119,6 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 			FHVPT_Reservoir Tap = InReservoirs[HVPT_GetReservoirIndex((uint2)TapPos)];
 
 			float MISWeight = 1.0f;
-			float Neighbour_Py = Tap.P_y;
 
 			if (i > 0) // Don't resample canonical - its already in this domain
 			{
@@ -131,6 +132,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 					CanonicalRay, RandSequence);
 			}
 
+#if ENABLE_TALBOT_MIS
 			if (Tap.RunningSum > 0.0f)
 			{
 				float PSum = 0.0f;
@@ -181,9 +183,10 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 				if (PSum > 0.0f)
 					MISWeight = PQi * K / PSum;
 			}
+#endif
 
 			Tap.RunningSum *= MISWeight;
-			bHasSelection |= HVPT_SimpleResampleStep<false>(Tap, OutReservoir, RandomSequence_GenerateSample1D(RandSequence));
+			(void)HVPT_SimpleResampleStep<false>(Tap, OutReservoir, RandomSequence_GenerateSample1D(RandSequence));
 		}
 	}
 
@@ -192,7 +195,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 	RWOutReservoirs[LinearPixelIndex] = OutReservoir;
 
 #if MULTIPLE_BOUNCES
-	if (bHasSelection)
+	if (OutReservoir.RunningSum > 0.0f)
 	{
 		uint OutExtraBounceIndex = HVPT_GetExtraBounceIndex(PixelCoord, 0);
 		for (uint Bounce = 0; Bounce < OutReservoir.NumExtraBounces; Bounce++)

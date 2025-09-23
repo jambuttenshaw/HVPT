@@ -97,6 +97,13 @@ static TAutoConsoleVariable<bool> CVarHVPTReSTIRTemporalReuse(
 	ECVF_RenderThreadSafe
 );
 
+static TAutoConsoleVariable<bool> CVarHVPTReSTIRTemporalReuseMIS(
+	TEXT("r.HVPT.ReSTIR.TemporalReuse.MIS"),
+	true,
+	TEXT("Enable Talbot MIS in temporal reuse in ReSTIR pipeline (Default = true)."),
+	ECVF_RenderThreadSafe
+);
+
 static TAutoConsoleVariable<int32> CVarHVPTReSTIRSpatialReuseSamples(
 	TEXT("r.HVPT.ReSTIR.SpatialReuse.NumSamples"),
 	0,
@@ -108,6 +115,13 @@ static TAutoConsoleVariable<float> CVarHVPTReSTIRSpatialReuseRadius(
 	TEXT("r.HVPT.ReSTIR.SpatialReuse.Radius"),
 	10.0f,
 	TEXT("Radius around each pixel where spatial reuse is considered."),
+	ECVF_RenderThreadSafe
+);
+
+static TAutoConsoleVariable<bool> CVarHVPTReSTIRSpatialReuseMIS(
+	TEXT("r.HVPT.ReSTIR.SpatialReuse.MIS"),
+	true,
+	TEXT("Enable Talbot MIS in spatial reuse in ReSTIR pipeline (Default = true)."),
 	ECVF_RenderThreadSafe
 );
 
@@ -336,6 +350,11 @@ namespace HVPT
 		return CVarHVPTReSTIRTemporalReuse.GetValueOnRenderThread();	
 	}
 
+	bool GetTemporalReuseMISEnabled()
+	{
+		return CVarHVPTReSTIRTemporalReuseMIS.GetValueOnRenderThread();
+	}
+
 	bool GetSpatialReuseEnabled()
 	{
 		return GetNumSpatialReuseSamples() > 0;
@@ -354,6 +373,11 @@ namespace HVPT
 	float GetSpatialReuseRadius()
 	{
 		return FMath::Max(CVarHVPTReSTIRSpatialReuseRadius.GetValueOnRenderThread(), 0.0f);
+	}
+
+	bool GetSpatialReuseMISEnabled()
+	{
+		return CVarHVPTReSTIRSpatialReuseMIS.GetValueOnRenderThread();	
 	}
 
 

@@ -7,7 +7,16 @@
 
 #include "DeferredShadingRenderer.h"
 
+#define LOCTEXT_NAMESPACE "HVPTModule"
+
 DECLARE_GPU_STAT_NAMED(HVPTStat, TEXT("HVPT"));
+
+
+namespace HVPT {
+
+TCustomShowFlag<> ShowHVPTDebug(TEXT("HVPTReSTIRDebug"), false, SFG_Developer, LOCTEXT("ShowFlagDisplayName", "HVPT ReSTIR Debug"));
+
+}
 
 
 FHVPTViewExtension::FHVPTViewExtension(const FAutoRegister& AutoRegister)
@@ -246,6 +255,20 @@ void FHVPTViewExtension::PostRenderView_RenderThread(FRDGBuilder& GraphBuilder, 
 	if (!ViewState)
 		return;
 
+	const uint32 ShowFlagIndex = static_cast<uint32>(FEngineShowFlags::FindIndexByName(TEXT("HVPTReSTIRDebug")));
+	if (InView.Family->EngineShowFlags.GetSingleFlag(ShowFlagIndex))
+	{
+		// Run debug visualization passes
+		FRDGTextureRef RenderTarget = RegisterExternalTexture(GraphBuilder, ViewInfo.Family->RenderTarget->GetRenderTargetTexture(), TEXT("HVPT.DebugRenderTarget"));
+
+		HVPT::RenderReSTIRDebug(
+			GraphBuilder,
+			ViewInfo,
+			*ViewState,
+			RenderTarget
+		);
+	}
+
 	// Extract resources used between frames
 	if (ViewState->OrthoGridUniformBuffer && ViewState->FrustumGridUniformBuffer)
 	{
@@ -291,3 +314,5 @@ FHVPTViewState* FHVPTViewExtension::GetOrCreateViewStateForView(const FViewInfo&
 
 	return nullptr;
 }
+
+#undef LOCTEXT_NAMESPACE

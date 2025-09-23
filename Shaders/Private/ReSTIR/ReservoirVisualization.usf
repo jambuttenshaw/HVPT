@@ -1,0 +1,23 @@
+
+#include "/Engine/Private/Common.ush"
+
+#ifndef THREADGROUP_SIZE_2D
+#define THREADGROUP_SIZE_2D 1
+#endif // THREADGROUP_SIZE_2D
+
+
+RWTexture2D<float4> RWRenderTarget;
+
+
+[numthreads(THREADGROUP_SIZE_2D, THREADGROUP_SIZE_2D, 1)]
+void HVPT_ReservoirVisualizationCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	int2 PixelCoord = DispatchThreadId.xy;
+
+	if (any(PixelCoord >= View.ViewSizeAndInvSize.xy))
+	{
+		return;
+	}
+
+	RWRenderTarget[PixelCoord] = float4(1.0f, 0.0f, 0.0f, 1.0f);
+}

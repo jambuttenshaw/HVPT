@@ -86,5 +86,14 @@ void Accumulate(
 	FHVPTViewState& State
 );
 
+
+// Debug passes
+void RenderReSTIRDebug(
+	FRDGBuilder& GraphBuilder,
+	const FViewInfo& ViewInfo,
+	FHVPTViewState& State,
+	FRDGTextureRef RenderTarget
+);
+
 #endif
 }

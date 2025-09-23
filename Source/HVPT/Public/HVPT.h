@@ -44,9 +44,11 @@ namespace HVPT
 	HVPT_API bool UseReSTIR();
 	HVPT_API int32 GetNumInitialCandidates();
 	HVPT_API bool GetTemporalReuseEnabled();
+	HVPT_API bool GetTemporalReuseMISEnabled();
 	HVPT_API bool GetSpatialReuseEnabled();
 	HVPT_API int32 GetNumSpatialReuseSamples();
 	HVPT_API float GetSpatialReuseRadius();
+	HVPT_API bool GetSpatialReuseMISEnabled();
 
 	// GBuffer writing controls
 	HVPT_API int32 GetTransmittanceMode();

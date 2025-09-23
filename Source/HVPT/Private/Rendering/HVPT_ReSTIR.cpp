@@ -115,6 +115,13 @@ public:
 	DECLARE_GLOBAL_SHADER(FReSTIRTemporalReuseRGS);
 	SHADER_USE_ROOT_PARAMETER_STRUCT(FReSTIRTemporalReuseRGS, FReSTIRBaseRGS);
 
+	class FTalbotMIS : SHADER_PERMUTATION_BOOL("ENABLE_TALBOT_MIS");
+	using FPermutationDomain = TShaderPermutationDomain<
+		FTalbotMIS,
+		FReSTIRBaseRGS::FMultipleBounces,
+		FReSTIRBaseRGS::FUseSurfaceContributions,
+		FReSTIRBaseRGS::FApplyVolumetricFog>;
+
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
 
@@ -135,6 +142,13 @@ class FReSTIRSpatialReuseRGS : public FReSTIRBaseRGS
 public:
 	DECLARE_GLOBAL_SHADER(FReSTIRSpatialReuseRGS);
 	SHADER_USE_ROOT_PARAMETER_STRUCT(FReSTIRSpatialReuseRGS, FReSTIRBaseRGS);
+
+	class FTalbotMIS : SHADER_PERMUTATION_BOOL("ENABLE_TALBOT_MIS");
+	using FPermutationDomain = TShaderPermutationDomain<
+		FTalbotMIS,
+		FReSTIRBaseRGS::FMultipleBounces,
+		FReSTIRBaseRGS::FUseSurfaceContributions,
+		FReSTIRBaseRGS::FApplyVolumetricFog>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
@@ -181,9 +195,8 @@ void HVPT::PrepareRaytracingShadersReSTIR(const FViewInfo& View, TArray<FRHIRayT
 {
 	auto ShaderMap = GetGlobalShaderMap(View.GetShaderPlatform());
 
-	auto AddShader = [&]<typename T>()
+	auto AddShader = [&]<typename T>(typename T::FPermutationDomain Permutation = typename T::FPermutationDomain{})
 	{
-		typename T::FPermutationDomain Permutation;
 		Permutation.Set<typename T::FMultipleBounces>(HVPT::GetMaxBounces() > 1);
 		Permutation.Set<typename T::FUseSurfaceContributions>(HVPT::UseSurfaceContributions());
 		Permutation.Set<typename T::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
@@ -192,8 +205,16 @@ void HVPT::PrepareRaytracingShadersReSTIR(const FViewInfo& View, TArray<FRHIRayT
 
 	// AddShader<T>() does not compile
 	AddShader.template operator()<FReSTIRCandidateGenerationRGS>();
-	AddShader.template operator()<FReSTIRTemporalReuseRGS>();
-	AddShader.template operator()<FReSTIRSpatialReuseRGS>();
+	{
+		FReSTIRTemporalReuseRGS::FPermutationDomain Permutation;
+		Permutation.Set<FReSTIRTemporalReuseRGS::FTalbotMIS>(HVPT::GetTemporalReuseMISEnabled());
+		AddShader.template operator()<FReSTIRTemporalReuseRGS>(Permutation);
+	}
+	{
+		FReSTIRSpatialReuseRGS::FPermutationDomain Permutation;
+		Permutation.Set<FReSTIRSpatialReuseRGS::FTalbotMIS>(HVPT::GetSpatialReuseMISEnabled());
+		AddShader.template operator()<FReSTIRSpatialReuseRGS>(Permutation);
+	}
 	AddShader.template operator()<FReSTIRFinalShadingRGS>();
 }
 
@@ -370,11 +391,14 @@ void HVPT::RenderWithReSTIRPathTracing(
 		PassParameters->RWCurrentReservoirs = GraphBuilder.CreateUAV(ReservoirsA);
 		PassParameters->RWCurrentExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesA);
 
+		FReSTIRTemporalReuseRGS::FPermutationDomain Permutation;
+		Permutation.Set<FReSTIRTemporalReuseRGS::FTalbotMIS>(HVPT::GetTemporalReuseMISEnabled());
 		AddRaytracingPass<FReSTIRTemporalReuseRGS>(
 			GraphBuilder,
 			RDG_EVENT_NAME("ReSTIRTemporalReuse"),
 			ViewInfo,
-			PassParameters
+			PassParameters,
+			Permutation
 		);
 	}
 
@@ -397,11 +421,14 @@ void HVPT::RenderWithReSTIRPathTracing(
 		PassParameters->RWOutReservoirs = GraphBuilder.CreateUAV(ReservoirsB);
 		PassParameters->RWOutExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesB);
 
+		FReSTIRSpatialReuseRGS::FPermutationDomain Permutation;
+		Permutation.Set<FReSTIRSpatialReuseRGS::FTalbotMIS>(HVPT::GetSpatialReuseMISEnabled());
 		AddRaytracingPass<FReSTIRSpatialReuseRGS>(
 			GraphBuilder,
 			RDG_EVENT_NAME("ReSTIRSpatialReuse"),
 			ViewInfo, 
-			PassParameters
+			PassParameters,
+			Permutation
 		);
 	}
 	else
@@ -435,5 +462,79 @@ void HVPT::RenderWithReSTIRPathTracing(
 	GraphBuilder.QueueBufferExtraction(ReservoirsB, &State.ReSTIRReservoirCache);
 	GraphBuilder.QueueBufferExtraction(ExtraBouncesB, &State.ReSTIRExtraBounceCache);
 }
+
+
+// Debug shaders
+class FHVPT_ReservoirVisualizationCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FHVPT_ReservoirVisualizationCS);
+	SHADER_USE_PARAMETER_STRUCT(FHVPT_ReservoirVisualizationCS, FGlobalShader)
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWRenderTarget)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return HVPT::DoesPlatformSupportHVPT(Parameters.Platform)
+			&& IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM6);
+	}
+
+	static void ModifyCompilationEnvironment(
+		const FGlobalShaderPermutationParameters& Parameters,
+		FShaderCompilerEnvironment& OutEnvironment
+	)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+
+		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE_2D"), GetThreadGroupSize2D());
+	}
+
+	static uint32 GetThreadGroupSize2D() { return 8; }
+};
+
+IMPLEMENT_GLOBAL_SHADER(FHVPT_ReservoirVisualizationCS, "/Plugin/HVPT/Private/ReSTIR/ReservoirVisualization.usf", "HVPT_ReservoirVisualizationCS", SF_Compute);
+
+
+void HVPT::RenderReSTIRDebug(
+	FRDGBuilder& GraphBuilder, 
+	const FViewInfo& ViewInfo, 
+	FHVPTViewState& State, 
+	FRDGTextureRef RenderTarget
+)
+{
+	RDG_EVENT_SCOPE(GraphBuilder, "HVPT: ReSTIR Debug");
+
+	FRDGTextureDesc Desc = RenderTarget->Desc;
+	FRDGTextureRef OutputTexture = GraphBuilder.CreateTexture(
+		FRDGTextureDesc::Create2D(Desc.Extent, Desc.Format, Desc.ClearValue, TexCreate_UAV),
+		TEXT("HVPT.ReSTIRDebug.Output"));
+
+	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(OutputTexture), 0.0f);
+
+	{
+		FHVPT_ReservoirVisualizationCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FHVPT_ReservoirVisualizationCS::FParameters>();
+		PassParameters->View = ViewInfo.ViewUniformBuffer;
+		PassParameters->RWRenderTarget = GraphBuilder.CreateUAV(OutputTexture);
+
+		FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(ViewInfo.FeatureLevel);
+		TShaderMapRef<FHVPT_ReservoirVisualizationCS> ComputeShader(ShaderMap);
+
+		FIntVector GroupCount = FComputeShaderUtils::GetGroupCount(ViewInfo.ViewRect.Size(), FHVPT_ReservoirVisualizationCS::GetThreadGroupSize2D());
+
+		FComputeShaderUtils::AddPass(
+			GraphBuilder,
+			RDG_EVENT_NAME("HVPT.ReservoirVisualization"),
+			ERDGPassFlags::Compute | ERDGPassFlags::NeverCull,
+			ComputeShader,
+			PassParameters,
+			GroupCount
+		);
+	}
+}
+
 
 #endif

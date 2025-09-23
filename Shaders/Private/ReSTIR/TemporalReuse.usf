@@ -13,6 +13,10 @@
 #define MULTIPLE_BOUNCES true
 #endif
 
+#ifndef ENABLE_TALBOT_MIS
+#define ENABLE_TALBOT_MIS true
+#endif
+
 
 Texture2D<float> SceneDepthTexture;
 Texture2D<float4> GBufferVelocityTexture;
@@ -168,6 +172,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 			Taps[i].RunningSum = 0.0f;
 		}
 
+#if ENABLE_TALBOT_MIS
 		// Calculate MIS weight
 		if (Taps[i].RunningSum > 0.0f)
 		{
@@ -228,6 +233,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 			if (PSum > 0.0f)
 				MISWeight = PQi * K / PSum;
 		}
+#endif
 
 		Taps[i].RunningSum *= MISWeight;
 
