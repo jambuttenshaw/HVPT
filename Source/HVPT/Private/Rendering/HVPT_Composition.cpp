@@ -79,6 +79,9 @@ void HVPT::Composite(
 	RDG_EVENT_SCOPE(GraphBuilder, "HVPT: Composite");
 
 	const FExponentialHeightFogSceneInfo& FogInfo = Scene.ExponentialFogs[0];
+	bool bEnableVolumetricFog = FogInfo.bEnableVolumetricFog
+							&& ViewInfo.VolumetricFogResources.IntegratedLightScatteringTexture
+							&& HVPT::GetFogCompositingMode() != EFogCompositionMode::Disabled;
 
 	FHVPT_CompositeCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FHVPT_CompositeCS::FParameters>();
 	PassParameters->View = ViewInfo.ViewUniformBuffer;
@@ -87,7 +90,7 @@ void HVPT::Composite(
 	PassParameters->ApplyVolumetricFog = FogInfo.bEnableVolumetricFog;
 	PassParameters->VolumetricFogStartDistance = FogInfo.VolumetricFogStartDistance;
 	PassParameters->IntegratedLightScattering = GraphBuilder.CreateSRV(
-		FogInfo.bEnableVolumetricFog ? ViewInfo.VolumetricFogResources.IntegratedLightScatteringTexture : GSystemTextures.GetVolumetricBlackDummy(GraphBuilder)
+		bEnableVolumetricFog ? ViewInfo.VolumetricFogResources.IntegratedLightScatteringTexture : GSystemTextures.GetVolumetricBlackDummy(GraphBuilder)
 	);
 	PassParameters->IntegratedLightScatteringSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 
@@ -99,7 +102,7 @@ void HVPT::Composite(
 	FIntVector GroupCount = FComputeShaderUtils::GetGroupCount(ViewInfo.ViewRect.Size(), FHVPT_CompositeCS::GetThreadGroupSize2D());
 
 	FHVPT_CompositeCS::FPermutationDomain Permutation;
-	Permutation.Set<FHVPT_CompositeCS::FApplyFog>(HVPT::GetFogCompositingMode() != EFogCompositionMode::Disabled);
+	Permutation.Set<FHVPT_CompositeCS::FApplyFog>(bEnableVolumetricFog);
 	TShaderRef<FHVPT_CompositeCS> ComputeShader = ViewInfo.ShaderMap->GetShader<FHVPT_CompositeCS>(Permutation);
 
 	FComputeShaderUtils::AddPass(
