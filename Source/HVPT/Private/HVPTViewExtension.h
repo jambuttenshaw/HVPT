@@ -18,6 +18,8 @@ public:
 	virtual void SetupView(FSceneViewFamily& InViewFamily, FSceneView& InView) override {}
 	virtual void BeginRenderViewFamily(FSceneViewFamily& InViewFamily) override {}
 
+	virtual void PreRenderView_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView) override;
+
 	virtual void PostRenderBasePassDeferred_RenderThread(
 		FRDGBuilder& GraphBuilder, FSceneView& InView, const FRenderTargetBindingSlots& RenderTargets, TRDGUniformBufferRef<FSceneTextureUniformParameters> SceneTextures
 	) override;
@@ -33,6 +35,12 @@ protected:
 	virtual bool IsActiveThisFrame_Internal(const FSceneViewExtensionContext& Context) const override;
 
 	FHVPTViewState* GetOrCreateViewStateForView(const FViewInfo& ViewInfo);
+
+private:
+
+	// Composites debug texture after scene render, to visualize data from HVPT rendering.
+	// The debug texture is available to write to from any pass for general purpose visualization and quick debugging.
+	
 
 private:
 	FDelegateHandle PrepareRTDelegateHandle;
@@ -84,15 +92,6 @@ void Accumulate(
 	FRDGBuilder& GraphBuilder,
 	const FViewInfo& ViewInfo,
 	FHVPTViewState& State
-);
-
-
-// Debug passes
-void RenderReSTIRDebug(
-	FRDGBuilder& GraphBuilder,
-	const FViewInfo& ViewInfo,
-	FHVPTViewState& State,
-	FRDGTextureRef RenderTarget
 );
 
 #endif

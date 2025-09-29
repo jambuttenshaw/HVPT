@@ -9,7 +9,7 @@ struct FHVPTViewState
 {
 	// RDG resources used within the frame
 	FRDGTextureRef RadianceTexture = nullptr;
-	FRDGTextureRef FeatureTexture = nullptr; // uint32 texture - low 16 bits transmittance, high 16 bits depth of first scattering event
+	FRDGTextureRef FeatureTexture = nullptr;
 
 	FRDGTextureRef TemporalAccumulationTexture = nullptr;
 
@@ -17,6 +17,9 @@ struct FHVPTViewState
 
 	TRDGUniformBufferRef<FHVPTOrthoGridUniformBufferParameters> OrthoGridUniformBuffer = nullptr;
 	TRDGUniformBufferRef<FHVPTFrustumGridUniformBufferParameters> FrustumGridUniformBuffer = nullptr;
+
+	FRDGTextureRef DebugTexture = nullptr; // General purpose texture for debug visualization
+	uint32 DebugFlags = 0;
 
 	// Cached resources used between frames
 

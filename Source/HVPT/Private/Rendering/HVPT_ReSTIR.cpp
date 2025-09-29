@@ -50,6 +50,10 @@ BEGIN_SHADER_PARAMETER_STRUCT(FReSTIRCommonParameters, )
 	SHADER_PARAMETER(uint32, TemporalSeed)
 
 	SHADER_PARAMETER(uint32, NumBounces)
+
+	// Debug tools
+	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float3>, RWDebugTexture)
+	SHADER_PARAMETER(uint32, DebugFlags) // To represent debug modes etc
 END_SHADER_PARAMETER_STRUCT()
 
 
@@ -350,6 +354,9 @@ void HVPT::RenderWithReSTIRPathTracing(
 			Parameters->TemporalSeed = HVPT::GetFreezeTemporalSeed() ? 0 : 4 * FrameIndex + TemporalSeedOffset;
 
 			Parameters->NumBounces = FMath::Clamp(HVPT::GetMaxBounces(), 1, kReSTIRMaxBounces);
+
+			Parameters->RWDebugTexture = GraphBuilder.CreateUAV(State.DebugTexture);
+			Parameters->DebugFlags = State.DebugFlags;
 		};
 
 
@@ -462,79 +469,5 @@ void HVPT::RenderWithReSTIRPathTracing(
 	GraphBuilder.QueueBufferExtraction(ReservoirsB, &State.ReSTIRReservoirCache);
 	GraphBuilder.QueueBufferExtraction(ExtraBouncesB, &State.ReSTIRExtraBounceCache);
 }
-
-
-// Debug shaders
-class FHVPT_ReservoirVisualizationCS : public FGlobalShader
-{
-public:
-	DECLARE_GLOBAL_SHADER(FHVPT_ReservoirVisualizationCS);
-	SHADER_USE_PARAMETER_STRUCT(FHVPT_ReservoirVisualizationCS, FGlobalShader)
-
-	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
-
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWRenderTarget)
-	END_SHADER_PARAMETER_STRUCT()
-
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return HVPT::DoesPlatformSupportHVPT(Parameters.Platform)
-			&& IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM6);
-	}
-
-	static void ModifyCompilationEnvironment(
-		const FGlobalShaderPermutationParameters& Parameters,
-		FShaderCompilerEnvironment& OutEnvironment
-	)
-	{
-		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
-
-		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE_2D"), GetThreadGroupSize2D());
-	}
-
-	static uint32 GetThreadGroupSize2D() { return 8; }
-};
-
-IMPLEMENT_GLOBAL_SHADER(FHVPT_ReservoirVisualizationCS, "/Plugin/HVPT/Private/ReSTIR/ReservoirVisualization.usf", "HVPT_ReservoirVisualizationCS", SF_Compute);
-
-
-void HVPT::RenderReSTIRDebug(
-	FRDGBuilder& GraphBuilder, 
-	const FViewInfo& ViewInfo, 
-	FHVPTViewState& State, 
-	FRDGTextureRef RenderTarget
-)
-{
-	RDG_EVENT_SCOPE(GraphBuilder, "HVPT: ReSTIR Debug");
-
-	FRDGTextureDesc Desc = RenderTarget->Desc;
-	FRDGTextureRef OutputTexture = GraphBuilder.CreateTexture(
-		FRDGTextureDesc::Create2D(Desc.Extent, Desc.Format, Desc.ClearValue, TexCreate_UAV),
-		TEXT("HVPT.ReSTIRDebug.Output"));
-
-	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(OutputTexture), 0.0f);
-
-	{
-		FHVPT_ReservoirVisualizationCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FHVPT_ReservoirVisualizationCS::FParameters>();
-		PassParameters->View = ViewInfo.ViewUniformBuffer;
-		PassParameters->RWRenderTarget = GraphBuilder.CreateUAV(OutputTexture);
-
-		FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(ViewInfo.FeatureLevel);
-		TShaderMapRef<FHVPT_ReservoirVisualizationCS> ComputeShader(ShaderMap);
-
-		FIntVector GroupCount = FComputeShaderUtils::GetGroupCount(ViewInfo.ViewRect.Size(), FHVPT_ReservoirVisualizationCS::GetThreadGroupSize2D());
-
-		FComputeShaderUtils::AddPass(
-			GraphBuilder,
-			RDG_EVENT_NAME("HVPT.ReservoirVisualization"),
-			ERDGPassFlags::Compute | ERDGPassFlags::NeverCull,
-			ComputeShader,
-			PassParameters,
-			GroupCount
-		);
-	}
-}
-
 
 #endif

@@ -14,7 +14,13 @@ DECLARE_GPU_STAT_NAMED(HVPTStat, TEXT("HVPT"));
 
 namespace HVPT {
 
-TCustomShowFlag<> ShowHVPTDebug(TEXT("HVPTReSTIRDebug"), false, SFG_Developer, LOCTEXT("ShowFlagDisplayName", "HVPT ReSTIR Debug"));
+TCustomShowFlag<> ShowHVPTDebug(TEXT("HVPTDebug"), false, SFG_Developer, LOCTEXT("ShowFlagDisplayName", "HVPT Debug"));
+
+static bool IsDebugShowFlagEnabled(const FSceneView& InView)
+{
+	int32 ShowFlagIndex = FEngineShowFlags::FindIndexByName(TEXT("HVPTDebug"));
+	return ShowFlagIndex >= 0 && InView.Family->EngineShowFlags.GetSingleFlag(static_cast<uint32>(ShowFlagIndex));
+}
 
 }
 
@@ -58,6 +64,33 @@ FHVPTViewExtension::~FHVPTViewExtension()
 	FGlobalIlluminationPluginDelegates::FAnyRayTracingPassEnabled& AnyRTPassEnabledDelegate = FGlobalIlluminationPluginDelegates::AnyRayTracingPassEnabled();
 	AnyRTPassEnabledDelegate.Remove(AnyRTPassEnabledDelegateHandle);
 #endif
+}
+
+void FHVPTViewExtension::PreRenderView_RenderThread(FRDGBuilder& GraphBuilder, FSceneView& InView)
+{
+#if RHI_RAYTRACING
+	if (!InView.bIsViewInfo || InView.Family->EngineShowFlags.PathTracing)
+		return;
+	const FViewInfo& ViewInfo = static_cast<const FViewInfo&>(InView);
+	if (ViewInfo.bIsReflectionCapture)
+		return;
+
+	auto ViewState = GetOrCreateViewStateForView(ViewInfo);
+	if (!ViewState)
+		return;
+
+	if (HVPT::IsDebugShowFlagEnabled(InView))
+	{
+		ViewState->DebugTexture = GraphBuilder.CreateTexture(
+			FRDGTextureDesc::Create2D(ViewInfo.ViewRect.Size(), PF_FloatRGBA, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_UAV),
+			TEXT("HVPT.DebugTexture"));
+		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ViewState->DebugTexture), 0.0f);
+
+		// LSB shows debug flag is enabled
+		ViewState->DebugFlags |= 0x00000001;
+	}
+#endif
+
 }
 
 void FHVPTViewExtension::PostRenderBasePassDeferred_RenderThread(
@@ -149,10 +182,7 @@ void FHVPTViewExtension::PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuild
 		FRDGTextureDesc::Create2D(ViewInfo.ViewRect.Size(), PF_G16R16F, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_UAV),
 		TEXT("HVPT.FeatureTexture"));
 
-	{
-		// 1.0 in 16 bit floating point = 0x3C00
-		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ViewState->FeatureTexture), { 1.0f, 0.0f });
-	}
+	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ViewState->FeatureTexture), { 1.0f, 0.0f });
 
 	// Run pre-pass to calculate transmittance and GBuffer properties
 	HVPT::RenderPrePass(
@@ -255,17 +285,19 @@ void FHVPTViewExtension::PostRenderView_RenderThread(FRDGBuilder& GraphBuilder, 
 	if (!ViewState)
 		return;
 
-	const uint32 ShowFlagIndex = static_cast<uint32>(FEngineShowFlags::FindIndexByName(TEXT("HVPTReSTIRDebug")));
-	if (InView.Family->EngineShowFlags.GetSingleFlag(ShowFlagIndex))
+	if (HVPT::IsDebugShowFlagEnabled(InView) && HasBeenProduced(ViewState->DebugTexture))
 	{
-		// Run debug visualization passes
-		FRDGTextureRef RenderTarget = RegisterExternalTexture(GraphBuilder, ViewInfo.Family->RenderTarget->GetRenderTargetTexture(), TEXT("HVPT.DebugRenderTarget"));
+		FRDGTextureRef RenderTarget = RegisterExternalTexture(
+			GraphBuilder, ViewInfo.Family->RenderTarget->GetRenderTargetTexture(), TEXT("HVPT.DebugRenderTarget")
+		);
 
-		HVPT::RenderReSTIRDebug(
+		AddDrawTexturePass(
 			GraphBuilder,
-			ViewInfo,
-			*ViewState,
-			RenderTarget
+			FScreenPassViewInfo{ ViewInfo },
+			ViewState->DebugTexture,
+			RenderTarget,
+			FIntPoint::ZeroValue, ViewState->DebugTexture->Desc.Extent,	// Input
+			FIntPoint::ZeroValue, RenderTarget->Desc.Extent				// Output
 		);
 	}
 
@@ -280,13 +312,14 @@ void FHVPTViewExtension::PostRenderView_RenderThread(FRDGBuilder& GraphBuilder, 
 		GraphBuilder.QueueTextureExtraction(ViewState->TemporalAccumulationTexture, &ViewState->TemporalAccumulationRT);
 	}
 
-	// Clear dangling pointers
+	// Clear dangling (once RDG has executed) pointers
 	ViewState->TemporalAccumulationTexture = nullptr;
 	ViewState->RadianceTexture = nullptr;
 	ViewState->FeatureTexture = nullptr;
 	ViewState->DepthBufferCopy = nullptr;
 	ViewState->FrustumGridUniformBuffer = nullptr;
 	ViewState->OrthoGridUniformBuffer = nullptr;
+	ViewState->DebugTexture = nullptr;
 
 #endif
 }
