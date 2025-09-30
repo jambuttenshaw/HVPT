@@ -32,4 +32,8 @@ struct FHVPTViewState
 	FHVPTFrustumGridParameterCache FrustumGridParameterCache;
 
 	uint32 AccumulatedSampleCount = 0;
+
+	// Debug tool: for freezing frame the radiance / transmittance is extracted and re-composited next frame
+	TRefCountPtr<IPooledRenderTarget> RadianceRT = nullptr;
+	TRefCountPtr<IPooledRenderTarget> FeatureRT = nullptr;
 };

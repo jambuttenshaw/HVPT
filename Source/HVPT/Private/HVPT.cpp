@@ -276,6 +276,14 @@ static TAutoConsoleVariable<bool> CVarHVPTFreezeTemporalSeed(
 	ECVF_RenderThreadSafe
 );
 
+static TAutoConsoleVariable<bool> CVarHVPTFreezeFrame(
+	TEXT("r.HVPT.FreezeFrame"),
+	false,
+	TEXT("Debug tool: Re-uses last frames image, no new computation is performed."
+		"Will not correctly freeze denoised image but is useful for debugging pre-denoised image."),
+	ECVF_RenderThreadSafe
+);
+
 static TAutoConsoleVariable<bool> CVarHVPTDisableRadiance(
 	TEXT("r.HVPT.DisableRadiance"),
 	false,
@@ -493,6 +501,11 @@ namespace HVPT
 	bool GetFreezeTemporalSeed()
 	{
 		return CVarHVPTFreezeTemporalSeed.GetValueOnRenderThread();
+	}
+
+	bool GetFreezeFrame()
+	{
+		return CVarHVPTFreezeFrame.GetValueOnRenderThread();
 	}
 
 	bool GetDisableRadiance()

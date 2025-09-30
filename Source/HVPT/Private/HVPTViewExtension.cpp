@@ -189,51 +189,64 @@ void FHVPTViewExtension::PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuild
 	AddCopyTexturePass(GraphBuilder, SceneTextures.Depth.Target, ViewState->DepthBufferCopy);
 
 	// Create texture to hold transmittance
-	ViewState->FeatureTexture = GraphBuilder.CreateTexture(
-		FRDGTextureDesc::Create2D(ViewInfo.ViewRect.Size(), PF_G16R16F, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_UAV),
-		TEXT("HVPT.FeatureTexture"));
+	if (HVPT::GetFreezeFrame() && ViewState->FeatureRT)
+	{
+		ViewState->FeatureTexture = GraphBuilder.RegisterExternalTexture(ViewState->FeatureRT);
+	}
+	else
+	{
+		ViewState->FeatureTexture = GraphBuilder.CreateTexture(
+			FRDGTextureDesc::Create2D(ViewInfo.ViewRect.Size(), PF_G16R16F, FClearValueBinding::None, TexCreate_ShaderResource | TexCreate_UAV),
+			TEXT("HVPT.FeatureTexture"));
 
-	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ViewState->FeatureTexture), { 1.0f, 0.0f });
+		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ViewState->FeatureTexture), { 1.0f, 0.0f });
 
-	// Run pre-pass to calculate transmittance and GBuffer properties
-	HVPT::RenderPrePass(
-		GraphBuilder,
-		ViewInfo,
-		SceneTextures,
-		*ViewState
-	);
+		// Run pre-pass to calculate transmittance and GBuffer properties
+		HVPT::RenderPrePass(
+			GraphBuilder,
+			ViewInfo,
+			SceneTextures,
+			*ViewState
+		);
+	}
 
 	// Create radiance texture
+	if (HVPT::GetFreezeFrame() && ViewState->RadianceRT)
+	{
+		ViewState->RadianceTexture = GraphBuilder.RegisterExternalTexture(ViewState->RadianceRT);
+	}
+	else
 	{
 		FRDGTextureDesc Desc = ViewInfo.GetSceneTextures().Color.Target->Desc;
 		Desc.Format = PF_FloatRGB;
 		Desc.Flags &= ~(TexCreate_FastVRAM);
 		ViewState->RadianceTexture = GraphBuilder.CreateTexture(Desc, TEXT("HVPT.Radiance"));
-	}
-	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ViewState->RadianceTexture), FLinearColor::Black);
 
-	// Perform radiance pass
-	if (!HVPT::GetDisableRadiance())
-	{
-		if (HVPT::UseReSTIR())
+		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ViewState->RadianceTexture), FLinearColor::Black);
+
+		// Perform radiance pass
+		if (!HVPT::GetDisableRadiance())
 		{
-			HVPT::RenderWithReSTIRPathTracing(
-				GraphBuilder,
-				*Scene,
-				ViewInfo,
-				SceneTextures,
-				*ViewState
-			);
-		}
-		else
-		{
-			HVPT::RenderWithPathTracing(
-				GraphBuilder,
-				*Scene,
-				ViewInfo,
-				SceneTextures,
-				*ViewState
-			);
+			if (HVPT::UseReSTIR())
+			{
+				HVPT::RenderWithReSTIRPathTracing(
+					GraphBuilder,
+					*Scene,
+					ViewInfo,
+					SceneTextures,
+					*ViewState
+				);
+			}
+			else
+			{
+				HVPT::RenderWithPathTracing(
+					GraphBuilder,
+					*Scene,
+					ViewInfo,
+					SceneTextures,
+					*ViewState
+				);
+			}
 		}
 	}
 
@@ -321,6 +334,16 @@ void FHVPTViewExtension::PostRenderView_RenderThread(FRDGBuilder& GraphBuilder, 
 	if (ViewState->TemporalAccumulationTexture)
 	{
 		GraphBuilder.QueueTextureExtraction(ViewState->TemporalAccumulationTexture, &ViewState->TemporalAccumulationRT);
+	}
+	if (HVPT::GetFreezeFrame() && ViewState->RadianceTexture && ViewState->FeatureTexture)
+	{
+		GraphBuilder.QueueTextureExtraction(ViewState->RadianceTexture, &ViewState->RadianceRT);
+		GraphBuilder.QueueTextureExtraction(ViewState->FeatureTexture, &ViewState->FeatureRT);
+	}
+	else
+	{
+		ViewState->RadianceRT = nullptr;
+		ViewState->FeatureRT = nullptr;
 	}
 
 	// Clear dangling (once RDG has executed) pointers

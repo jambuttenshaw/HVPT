@@ -84,6 +84,7 @@ namespace HVPT
 
 	// Debug tools
 	HVPT_API bool GetFreezeTemporalSeed();
+	HVPT_API bool GetFreezeFrame();
 	HVPT_API bool GetDisableRadiance();
 	HVPT_API bool GetVisualizeVelocity();
 	HVPT_API uint32 GetDebugViewMode();
