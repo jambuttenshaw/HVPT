@@ -294,9 +294,7 @@ static TAutoConsoleVariable<int32> CVarHVPTDebugViewMode(
 	TEXT("r.HVPT.DebugViewMode"),
 	0,
 	TEXT("Debug tool: Changes the view mode shown by the HVPT Debug show flag."
-		"0 (default): Num bounces"
-		"1          : Path type"
-		"For custom view mode, set to any value outside range 0-255"),
+		"For a list of view modes and their IDs, see HVPT/Shaders/Shared/HVPTDefinitions.h"),
 	ECVF_RenderThreadSafe
 );
 
