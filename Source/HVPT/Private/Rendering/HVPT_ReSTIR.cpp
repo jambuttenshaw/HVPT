@@ -64,7 +64,8 @@ public:
 	class FMultipleBounces : SHADER_PERMUTATION_BOOL("MULTIPLE_BOUNCES");
 	class FUseSurfaceContributions : SHADER_PERMUTATION_BOOL("USE_SURFACE_CONTRIBUTIONS");
 	class FApplyVolumetricFog : SHADER_PERMUTATION_BOOL("APPLY_VOLUMETRIC_FOG");
-	using FPermutationDomain = TShaderPermutationDomain<FMultipleBounces, FUseSurfaceContributions, FApplyVolumetricFog>;
+	class FDebugOutputEnabled : SHADER_PERMUTATION_BOOL("DEBUG_OUTPUT_ENABLED");
+	using FPermutationDomain = TShaderPermutationDomain<FMultipleBounces, FUseSurfaceContributions, FApplyVolumetricFog, FDebugOutputEnabled>;
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
@@ -122,9 +123,10 @@ public:
 	class FTalbotMIS : SHADER_PERMUTATION_BOOL("ENABLE_TALBOT_MIS");
 	using FPermutationDomain = TShaderPermutationDomain<
 		FTalbotMIS,
-		FReSTIRBaseRGS::FMultipleBounces,
-		FReSTIRBaseRGS::FUseSurfaceContributions,
-		FReSTIRBaseRGS::FApplyVolumetricFog>;
+		FMultipleBounces,
+		FUseSurfaceContributions,
+		FApplyVolumetricFog,
+		FDebugOutputEnabled>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
@@ -150,9 +152,10 @@ public:
 	class FTalbotMIS : SHADER_PERMUTATION_BOOL("ENABLE_TALBOT_MIS");
 	using FPermutationDomain = TShaderPermutationDomain<
 		FTalbotMIS,
-		FReSTIRBaseRGS::FMultipleBounces,
-		FReSTIRBaseRGS::FUseSurfaceContributions,
-		FReSTIRBaseRGS::FApplyVolumetricFog>;
+		FMultipleBounces,
+		FUseSurfaceContributions,
+		FApplyVolumetricFog,
+		FDebugOutputEnabled>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
@@ -195,7 +198,36 @@ public:
 IMPLEMENT_GLOBAL_SHADER(FReSTIRFinalShadingRGS, "/Plugin/HVPT/Private/ReSTIR/FinalShading.usf", "ReSTIRFinalShadingRGS", SF_RayGen)
 
 
-void HVPT::PrepareRaytracingShadersReSTIR(const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders)
+class FReSTIRDebugVisualizationCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FReSTIRDebugVisualizationCS);
+	SHADER_USE_PARAMETER_STRUCT(FReSTIRDebugVisualizationCS, FGlobalShader)
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
+
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Reservoir>, Reservoirs)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return HVPT::DoesPlatformSupportHVPT(Parameters.Platform);
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE_2D"), GetThreadGroupSize2D());
+	}
+
+	static uint32 GetThreadGroupSize2D() { return 8; }
+};
+
+IMPLEMENT_GLOBAL_SHADER(FReSTIRDebugVisualizationCS, "/Plugin/HVPT/Private/ReSTIR/ReservoirVisualization.usf", "ReSTIRDebugVisualizationCS", SF_Compute);
+
+
+void HVPT::PrepareRaytracingShadersReSTIR(const FViewInfo& View, const FHVPTViewState& State, TArray<FRHIRayTracingShader*>& OutRayGenShaders)
 {
 	auto ShaderMap = GetGlobalShaderMap(View.GetShaderPlatform());
 
@@ -204,6 +236,7 @@ void HVPT::PrepareRaytracingShadersReSTIR(const FViewInfo& View, TArray<FRHIRayT
 		Permutation.Set<typename T::FMultipleBounces>(HVPT::GetMaxBounces() > 1);
 		Permutation.Set<typename T::FUseSurfaceContributions>(HVPT::UseSurfaceContributions());
 		Permutation.Set<typename T::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
+		Permutation.Set<typename T::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 		OutRayGenShaders.Add(ShaderMap->GetShader<T>(Permutation).GetRayTracingShader());
 	};
 
@@ -228,11 +261,12 @@ void AddRaytracingPass(
 	FRDGBuilder& GraphBuilder,
 	FRDGEventName&& EventName,
 	const FViewInfo& View,
+	const FHVPTViewState& State,
 	typename Shader::FParameters* PassParameters
 )
 {
 	typename Shader::FPermutationDomain Permutation;
-	AddRaytracingPass<Shader>(GraphBuilder, std::move(EventName), View, PassParameters, Permutation);
+	AddRaytracingPass<Shader>(GraphBuilder, std::move(EventName), View, State, PassParameters, Permutation);
 }
 
 template <typename Shader>
@@ -240,6 +274,7 @@ void AddRaytracingPass(
 	FRDGBuilder& GraphBuilder,
 	FRDGEventName&& EventName,
 	const FViewInfo& ViewInfo,
+	const FHVPTViewState& State,
 	typename Shader::FParameters* PassParameters,
 	typename Shader::FPermutationDomain& Permutation
 )
@@ -251,6 +286,7 @@ void AddRaytracingPass(
 	Permutation.Set<typename Shader::FMultipleBounces>(HVPT::GetMaxBounces() > 1);
 	Permutation.Set<typename Shader::FUseSurfaceContributions>(HVPT::UseSurfaceContributions());
 	Permutation.Set<typename Shader::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
+	Permutation.Set<typename Shader::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 	TShaderMapRef<Shader> RayGenShader(ViewInfo.ShaderMap, Permutation);
 
 	GraphBuilder.AddPass(
@@ -355,8 +391,11 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 			Parameters->NumBounces = FMath::Clamp(HVPT::GetMaxBounces(), 1, kReSTIRMaxBounces);
 
-			Parameters->RWDebugTexture = GraphBuilder.CreateUAV(State.DebugTexture);
-			Parameters->DebugFlags = State.DebugFlags;
+			if (State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE)
+			{
+				Parameters->RWDebugTexture = GraphBuilder.CreateUAV(State.DebugTexture);
+				Parameters->DebugFlags = State.DebugFlags;
+			}
 		};
 
 
@@ -378,6 +417,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 			GraphBuilder,
 			RDG_EVENT_NAME("ReSTIRCandidateGeneration"),
 			ViewInfo, 
+			State,
 			PassParameters
 		);
 	}
@@ -404,6 +444,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 			GraphBuilder,
 			RDG_EVENT_NAME("ReSTIRTemporalReuse"),
 			ViewInfo,
+			State,
 			PassParameters,
 			Permutation
 		);
@@ -433,7 +474,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 		AddRaytracingPass<FReSTIRSpatialReuseRGS>(
 			GraphBuilder,
 			RDG_EVENT_NAME("ReSTIRSpatialReuse"),
-			ViewInfo, 
+			ViewInfo,
+			State,
 			PassParameters,
 			Permutation
 		);
@@ -461,7 +503,33 @@ void HVPT::RenderWithReSTIRPathTracing(
 			GraphBuilder,
 			RDG_EVENT_NAME("ReSTIRFinalShading"),
 			ViewInfo, 
+			State,
 			PassParameters
+		);
+	}
+
+	// Run debug pass
+	if (State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE)
+	{
+		RDG_EVENT_SCOPE(GraphBuilder, "HVPT: ReSTIR (Debug Visualization)");
+
+		FReSTIRDebugVisualizationCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRDebugVisualizationCS::FParameters>();
+		PopulateCommonParameters(&PassParameters->Common, 4);
+
+		PassParameters->Reservoirs = GraphBuilder.CreateSRV(ReservoirsB);
+
+		FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(ViewInfo.FeatureLevel);
+		TShaderMapRef<FReSTIRDebugVisualizationCS> ComputeShader(ShaderMap);
+
+		FIntVector GroupCount = FComputeShaderUtils::GetGroupCount(ViewInfo.ViewRect.Size(), FReSTIRDebugVisualizationCS::GetThreadGroupSize2D());
+
+		FComputeShaderUtils::AddPass(
+			GraphBuilder,
+			RDG_EVENT_NAME("ReSTIRDebugVisualization"),
+			ERDGPassFlags::Compute,
+			ComputeShader,
+			PassParameters,
+			GroupCount
 		);
 	}
 

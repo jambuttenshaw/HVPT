@@ -86,6 +86,7 @@ namespace HVPT
 	HVPT_API bool GetFreezeTemporalSeed();
 	HVPT_API bool GetDisableRadiance();
 	HVPT_API bool GetVisualizeVelocity();
+	HVPT_API uint32 GetDebugViewMode();
 
 	// Query support
 	HVPT_API bool DoesPlatformSupportHVPT(EShaderPlatform Platform);

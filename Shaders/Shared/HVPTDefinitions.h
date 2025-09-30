@@ -38,6 +38,23 @@ struct FHVPT_Bounce
 };
 
 
+// Debug tools
+
+// Flags and view modes are packed together into a single uint
+// Flags occupy top 24 bits
+// Debug view modes are placed into bottom 8 bits (giving 256 possible view modes)
+
+// Debug flags
+#define HVPT_DEBUG_FLAG_ENABLE					0x00000100
+
+// Debug view modes
+#define HVPT_DEBUG_VIEW_MODE_NUM_BOUNCES		0x00
+#define HVPT_DEBUG_VIEW_MODE_PATH_TYPE			0x01		// Scattering vs Emission
+#define HVPT_DEBUG_VIEW_MODE_TEMPORAL_REUSE		0x02		// Whether temporal sample was selected
+
+#define HVPT_DEBUG_VIEW_MODE_CUSTOM				0xFF		// Used for temporary debug visualization
+
+
 #ifdef __cplusplus
 }
 

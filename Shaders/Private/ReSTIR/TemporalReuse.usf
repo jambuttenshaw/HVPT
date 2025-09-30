@@ -32,6 +32,11 @@ RWStructuredBuffer<FHVPT_Reservoir> RWCurrentReservoirs;
 RWStructuredBuffer<FHVPT_Bounce> RWCurrentExtraBounces;
 
 
+// Debug tools
+uint DebugFlags;
+RWTexture2D<float3> RWDebugTexture;
+
+
 #if MULTIPLE_BOUNCES
 
 template<bool bCurrentFrame>
@@ -254,6 +259,13 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 	{
 		LoadExtraBounces<false>(ExtraBouncePixelIndex, OutReservoir.NumExtraBounces, Bounces);
 		WriteExtraBounces(ExtraBouncePixelIndex, OutReservoir.NumExtraBounces, Bounces);
+	}
+#endif
+
+#if DEBUG_OUTPUT_ENABLED
+	if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_TEMPORAL_REUSE)
+	{
+		RWDebugTexture[PixelCoord] = (SelectedId == 0) ? float3(1, 0, 0) : float3(0, 1, 0);
 	}
 #endif
 }

@@ -290,6 +290,16 @@ static TAutoConsoleVariable<bool> CVarHVPTVisualizeVelocity(
 	ECVF_RenderThreadSafe
 );
 
+static TAutoConsoleVariable<int32> CVarHVPTDebugViewMode(
+	TEXT("r.HVPT.DebugViewMode"),
+	0,
+	TEXT("Debug tool: Changes the view mode shown by the HVPT Debug show flag."
+		"0 (default): Num bounces"
+		"1          : Path type"
+		"For custom view mode, set to any value outside range 0-255"),
+	ECVF_RenderThreadSafe
+);
+
 
 // HVPT getters
 namespace HVPT
@@ -495,6 +505,16 @@ namespace HVPT
 	bool GetVisualizeVelocity()
 	{
 		return CVarHVPTVisualizeVelocity.GetValueOnRenderThread();
+	}
+
+	uint32 GetDebugViewMode()
+	{
+		int32 ViewMode = CVarHVPTDebugViewMode.GetValueOnRenderThread();
+		if (ViewMode < 0 || ViewMode > 255)
+		{
+			ViewMode = 255;
+		}
+		return static_cast<uint32>(ViewMode);
 	}
 
 

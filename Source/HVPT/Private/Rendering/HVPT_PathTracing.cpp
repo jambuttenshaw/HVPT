@@ -91,7 +91,7 @@ public:
 IMPLEMENT_GLOBAL_SHADER(FHVPT_RenderWithPathTracingRGS, "/Plugin/HVPT/Private/PathTracing.usf", "HVPT_RenderWithPathTracingRGS", SF_RayGen);
 
 
-void HVPT::PrepareRaytracingShaders(const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders)
+void HVPT::PrepareRaytracingShaders(const FViewInfo& View, const FHVPTViewState& State, TArray<FRHIRayTracingShader*>& OutRayGenShaders)
 {
 	auto ShaderMap = GetGlobalShaderMap(View.GetShaderPlatform());
 

@@ -6,6 +6,7 @@
 #include "Rendering/VoxelGrid.h"
 
 #include "DeferredShadingRenderer.h"
+#include "HVPTDefinitions.h"
 
 #define LOCTEXT_NAMESPACE "HVPTModule"
 
@@ -31,17 +32,21 @@ FHVPTViewExtension::FHVPTViewExtension(const FAutoRegister& AutoRegister)
 	// Subscribe to GI plugin events - this allows us to inject our raytracing raygen shaders
 #if RHI_RAYTRACING
 	FGlobalIlluminationPluginDelegates::FPrepareRayTracing& PrepareRTDelegate = FGlobalIlluminationPluginDelegates::PrepareRayTracing();
-	PrepareRTDelegateHandle = PrepareRTDelegate.AddStatic([](const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders)
+	PrepareRTDelegateHandle = PrepareRTDelegate.AddLambda([this](const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders)
 		{
+			auto ViewState = this->GetOrCreateViewStateForView(View);
+			if (!ViewState)
+				return;
+
 			if (HVPT::UseHVPT_RenderThread())
 			{
 				if (HVPT::UseReSTIR())
 				{
-					HVPT::PrepareRaytracingShadersReSTIR(View, OutRayGenShaders);
+					HVPT::PrepareRaytracingShadersReSTIR(View, *ViewState, OutRayGenShaders);
 				}
 				else
 				{
-					HVPT::PrepareRaytracingShaders(View, OutRayGenShaders);
+					HVPT::PrepareRaytracingShaders(View, *ViewState, OutRayGenShaders);
 				}
 			}
 		});
@@ -86,8 +91,14 @@ void FHVPTViewExtension::PreRenderView_RenderThread(FRDGBuilder& GraphBuilder, F
 			TEXT("HVPT.DebugTexture"));
 		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ViewState->DebugTexture), 0.0f);
 
-		// LSB shows debug flag is enabled
-		ViewState->DebugFlags |= 0x00000001;
+		// Set debug view mode
+		ViewState->DebugFlags = HVPT::GetDebugViewMode();
+		// Populate flags
+		ViewState->DebugFlags |= HVPT_DEBUG_FLAG_ENABLE;
+	}
+	else
+	{
+		ViewState->DebugFlags = 0;
 	}
 #endif
 

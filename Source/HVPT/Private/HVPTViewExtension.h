@@ -54,8 +54,8 @@ namespace HVPT
 {
 #if RHI_RAYTRACING
 
-void PrepareRaytracingShaders(const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders);
-void PrepareRaytracingShadersReSTIR(const FViewInfo& View, TArray<FRHIRayTracingShader*>& OutRayGenShaders);
+void PrepareRaytracingShaders(const FViewInfo& View, const FHVPTViewState& State, TArray<FRHIRayTracingShader*>& OutRayGenShaders);
+void PrepareRaytracingShadersReSTIR(const FViewInfo& View, const FHVPTViewState& State, TArray<FRHIRayTracingShader*>& OutRayGenShaders);
 
 void RenderPrePass(
 	FRDGBuilder& GraphBuilder,
