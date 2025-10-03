@@ -98,7 +98,6 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 	FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES];
 #endif
 
-	float TemporalOriginalDepth = 0.0f;
 	// TODO: Rename to ReprojectedPixelCoord
 	uint2 ReprojectedScreenPos = 0;
 
@@ -106,6 +105,8 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 	bool bBackgroundReservoir = FeatureTransmittance == 1.0f;
 
 	bool bUseFallbackReservoir = true;
+
+	float3 Debug = 0.0f;
 
 	// Reprojection
 	if (false)
@@ -123,25 +124,38 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 	float CurrentM = Taps[0].M;
 	float MaxPrevM = /* Temporal History Threshold = */ 4.0f * CurrentM;
 
-	// Convert depths to current frame depths
+	// NonCanonicalSampleDepthInPrevFrame: Stores the original depth from last frames reservoir
+	// The depth value in the reservoir is then reprojected into this frame and stored in the reservoir
+	float NonCanonicalSampleDepthInPrevFrame = 0.0f;
 	if (NumUsedReservoirs == 2)
 	{
-		TemporalOriginalDepth = Taps[1].Depth;
+		NonCanonicalSampleDepthInPrevFrame = Taps[1].Depth;
 		if (Taps[1].Depth != POSITIVE_INFINITY)
 		{
 			float3 Direction = ComputePreviousFrameRayDirection(ReprojectedScreenPos);
-
+			
 			float3 WorldPos = View.PrevTranslatedWorldCameraOrigin + Taps[1].Depth * Direction;
 			Taps[1].Depth = length(WorldPos - CanonicalRay.Origin);
 		}
 	}
 
-	float CenterPrevFrameDepth = Taps[0].Depth;
-	if (CenterPrevFrameDepth != POSITIVE_INFINITY)
+	// CanonicalSampleDepthInPrevFrame: Take the depth of the canonical sample from this frame.
+	// What is the distance from the PREVIOUS view origin to the sample point of this frame
+	float CanonicalSampleDepthInPrevFrame = Taps[0].Depth;
+	if (CanonicalSampleDepthInPrevFrame != POSITIVE_INFINITY)
 	{
-		float3 WorldPos = CanonicalRay.Origin + CanonicalRay.Direction * CenterPrevFrameDepth;
-		CenterPrevFrameDepth = length(WorldPos - View.PrevTranslatedWorldCameraOrigin);
+		float3 WorldPos = CanonicalRay.Origin + CanonicalRay.Direction * CanonicalSampleDepthInPrevFrame;
+		CanonicalSampleDepthInPrevFrame = length(WorldPos - View.PrevTranslatedWorldCameraOrigin);
 	}
+
+	Debug.x = 
+	//	//Taps[0].Depth != POSITIVE_INFINITY
+	//	//&& 
+		abs(Taps[0].Depth - CanonicalSampleDepthInPrevFrame) < 1e-2;
+	Debug.y = 
+		//Taps[1].Depth != POSITIVE_INFINITY
+		//&& 
+		abs(Taps[1].Depth - NonCanonicalSampleDepthInPrevFrame) < 1e-2;
 
 	bool HasSelection = false;
 	uint SelectedId = (uint) -1;
@@ -210,7 +224,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 					ReprojectedRay.Direction = ComputePreviousFrameRayDirection(TapPos_j);
 
 					// Use reservoir stored depth if evaluating ray in current frame domain - otherwise use reprojected depth
-					float UsedDepth = (j == 0) ? Taps[i].Depth : ((i == 0) ? CenterPrevFrameDepth : TemporalOriginalDepth);
+					float UsedDepth = (j == 0) ? Taps[i].Depth : ((i == 0) ? CanonicalSampleDepthInPrevFrame : NonCanonicalSampleDepthInPrevFrame);
 					float BackupDepth = Taps[i].Depth;
 					Taps[i].Depth = UsedDepth;
 
@@ -267,5 +281,10 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 	{
 		RWDebugTexture[PixelCoord] = (SelectedId == 0) ? float3(1, 0, 0) : float3(0, 1, 0);
 	}
+	else if ((DebugFlags & 0XFF) == HVPT_DEBUG_VIEW_MODE_CUSTOM)
+	{
+		RWDebugTexture[PixelCoord] = HasSelection ? Debug : 0.0f;
+	}
+	
 #endif
 }

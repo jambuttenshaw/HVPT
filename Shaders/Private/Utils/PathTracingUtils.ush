@@ -31,7 +31,7 @@ FRayDesc HVPT_CreateRayDesc(uint2 PixelCoord, float DeviceZ = 0.0f)
 	float4 TranslatedWorldPosition = mul(float4(ScreenPos, 1, 1), View.SVPositionToTranslatedWorld);
 	TranslatedWorldPosition.xyz /= TranslatedWorldPosition.w;
 
-	float3 WorldOrigin = TranslatedWorldPosition.xyz;
+	float3 WorldOrigin = View.TranslatedWorldCameraOrigin;
 	float3 WorldDirection = GetCameraVectorFromTranslatedWorldPosition(TranslatedWorldPosition.xyz);
 
 	FRayDesc RayDesc;
