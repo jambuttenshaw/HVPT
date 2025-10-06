@@ -148,15 +148,6 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 		CanonicalSampleDepthInPrevFrame = length(WorldPos - View.PrevTranslatedWorldCameraOrigin);
 	}
 
-	Debug.x = 
-	//	//Taps[0].Depth != POSITIVE_INFINITY
-	//	//&& 
-		abs(Taps[0].Depth - CanonicalSampleDepthInPrevFrame) < 1e-2;
-	Debug.y = 
-		//Taps[1].Depth != POSITIVE_INFINITY
-		//&& 
-		abs(Taps[1].Depth - NonCanonicalSampleDepthInPrevFrame) < 1e-2;
-
 	bool HasSelection = false;
 	uint SelectedId = (uint) -1;
 
@@ -174,6 +165,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 
 			if (i > 0)
 			{
+				// Resample temporal sample in the canonical (this frame's) domain
 #if MULTIPLE_BOUNCES
 				LoadExtraBounces<false>(PixelCoord, Taps[i].NumExtraBounces, Bounces);
 #endif
@@ -201,22 +193,24 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 
 			for (uint j = 0; j < NumUsedReservoirs; j++)
 			{
+				// Select domain
 				uint2 TapPos_j = (j == 0) ? PixelCoord : ReprojectedScreenPos;
 				float CorrectedM = min(MaxPrevM, Taps[j].M);
 
 				K += CorrectedM;
 
-				if (j == 0)
+				if (j == 0) // Canonical sample in canonical domain
 				{
 					PQi = Taps[i].P_y;
 					PSum += Taps[i].P_y * CorrectedM;
 				}
-				else if (i == j)
+				else if (i == j) // Temporal sample in temporal domain
 				{
+					//Debug = 1.0f;
 					PQi = Neighbour_P_y;
-					PSum = Neighbour_P_y * CorrectedM;
+					PSum += Neighbour_P_y * CorrectedM;
 				}
-				else
+				else // resample in neighbours domain (canonical in temporal and temporal in canonical)
 				{
 					// Create camera ray using previous frames camera properties
 					FRayDesc ReprojectedRay = (FRayDesc)0;
@@ -224,7 +218,9 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 					ReprojectedRay.Direction = ComputePreviousFrameRayDirection(TapPos_j);
 
 					// Use reservoir stored depth if evaluating ray in current frame domain - otherwise use reprojected depth
-					float UsedDepth = (j == 0) ? Taps[i].Depth : ((i == 0) ? CanonicalSampleDepthInPrevFrame : NonCanonicalSampleDepthInPrevFrame);
+					float UsedDepth = (i == 0) // Note: j is always 1 in this branch
+									? CanonicalSampleDepthInPrevFrame		// Canonical sample in temporal domain
+									: NonCanonicalSampleDepthInPrevFrame;	// Temporal sample in canonical domain
 					float BackupDepth = Taps[i].Depth;
 					Taps[i].Depth = UsedDepth;
 
@@ -232,7 +228,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 					if (i == 0)
 						LoadExtraBounces<true>(PixelCoord, Taps[i].NumExtraBounces, Bounces);
 					else
-						LoadExtraBounces<true>(TapPos_j, Taps[i].NumExtraBounces, Bounces);
+						LoadExtraBounces<false>(ReprojectedScreenPos, Taps[i].NumExtraBounces, Bounces);
 #endif
 
 					float P_y = Luminance(HVPT_EvaluateF<false>(Taps[i],
@@ -257,6 +253,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 		Taps[i].RunningSum *= MISWeight;
 
 		if (HVPT_SimpleResampleStep<true>(Taps[i], OutReservoir, RandomSequence_GenerateSample1D(RandSequence), MaxPrevM))
+		//if (HVPT_SimpleResampleStep<false>(Taps[i], OutReservoir, RandomSequence_GenerateSample1D(RandSequence)))
 		{
 			SelectedId = i;
 			HasSelection = true;
