@@ -104,6 +104,13 @@ static TAutoConsoleVariable<bool> CVarHVPTReSTIRTemporalReuseMIS(
 	ECVF_RenderThreadSafe
 );
 
+static TAutoConsoleVariable<float> CVarHVPTReSTIRTemporalReuseHistoryThreshold(
+	TEXT("r.HVPT.ReSTIR.TemporalReuse.HistoryThreshold"),
+	4.0f,
+	TEXT("Threshold on weight for temporal samples to prevent infinite reuse (Default = 4.0f)."),
+	ECVF_RenderThreadSafe
+);
+
 static TAutoConsoleVariable<int32> CVarHVPTReSTIRSpatialReuseSamples(
 	TEXT("r.HVPT.ReSTIR.SpatialReuse.NumSamples"),
 	0,
@@ -369,6 +376,11 @@ namespace HVPT
 	bool GetTemporalReuseMISEnabled()
 	{
 		return CVarHVPTReSTIRTemporalReuseMIS.GetValueOnRenderThread();
+	}
+
+	float GetTemporalReuseHistoryThreshold()
+	{
+		return CVarHVPTReSTIRTemporalReuseHistoryThreshold.GetValueOnRenderThread();
 	}
 
 	bool GetSpatialReuseEnabled()

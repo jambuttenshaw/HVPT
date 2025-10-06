@@ -138,6 +138,8 @@ public:
 
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Reservoir>, RWCurrentReservoirs)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Bounce>, RWCurrentExtraBounces)
+
+		SHADER_PARAMETER(float, TemporalHistoryThreshold)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -170,7 +172,6 @@ public:
 
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Reservoir>, RWOutReservoirs)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Bounce>, RWOutExtraBounces)
-
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -437,6 +438,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 		PassParameters->RWCurrentReservoirs = GraphBuilder.CreateUAV(ReservoirsA);
 		PassParameters->RWCurrentExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesA);
+
+		PassParameters->TemporalHistoryThreshold = HVPT::GetTemporalReuseHistoryThreshold();
 
 		FReSTIRTemporalReuseRGS::FPermutationDomain Permutation;
 		Permutation.Set<FReSTIRTemporalReuseRGS::FTalbotMIS>(HVPT::GetTemporalReuseMISEnabled());
