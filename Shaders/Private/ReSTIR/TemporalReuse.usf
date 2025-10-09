@@ -101,24 +101,48 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 #endif
 
 	// TODO: Rename to ReprojectedPixelCoord
-	uint2 ReprojectedScreenPos = 0;
+	uint2 ReprojectedPixelCoord = PixelCoord;
 
 	float FeatureTransmittance = FeatureTexture[PixelCoord].r;
 	bool bBackgroundReservoir = FeatureTransmittance == 1.0f;
 
-	bool bUseFallbackReservoir = true;
+	float3 Debug = 0;
 
 	// Reprojection
-	if (false)
 	{
-		
+		float ReprojectionDepth = Taps[0].Depth;
+		if (ReprojectionDepth == POSITIVE_INFINITY)
+		{
+			// Velocity resampling
+		}
+
+		// If successfully have sample
+		if (ReprojectionDepth != POSITIVE_INFINITY)
+		{
+			float3 WorldPos = CanonicalRay.Origin + ReprojectionDepth * CanonicalRay.Direction;
+
+			// Find previous frame world position if we have velocity data
+			float3 Velocity = HVPT_GetVelocity(WorldPos);
+			WorldPos -= Velocity;
+
+			float4 ClipPos = mul(float4(WorldPos, 1), View.PrevTranslatedWorldToClip);
+
+			float2 ScreenPos = ClipPos.xy / ClipPos.w;
+			ScreenPos.x = 0.5 * ScreenPos.x + 0.5;
+			ScreenPos.y = -0.5 * ScreenPos.y + 0.5;
+			ScreenPos *= View.ViewSizeAndInvSize.xy;
+			int2 ScreenPosI = int2(ScreenPos + 0.5f);
+
+			if (all(ScreenPosI >= 0) && all(ScreenPosI < View.ViewSizeAndInvSize.xy))
+			{
+				ReprojectedPixelCoord = uint2(ScreenPosI);
+			}
+		}
 	}
 
-	if (bUseFallbackReservoir)
 	{
 		NumUsedReservoirs++;
-		ReprojectedScreenPos = PixelCoord;
-		Taps[1] = PreviousReservoirs[HVPT_GetReservoirIndex(ReprojectedScreenPos)];
+		Taps[1] = PreviousReservoirs[HVPT_GetReservoirIndex(ReprojectedPixelCoord)];
 	}
 
 	float CurrentM = Taps[0].M;
@@ -135,7 +159,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 		NonCanonicalSampleDepthInPrevFrame = Taps[1].Depth;
 		if (Taps[1].Depth != POSITIVE_INFINITY)
 		{
-			float3 Direction = ComputePreviousFrameRayDirection(ReprojectedScreenPos);
+			float3 Direction = ComputePreviousFrameRayDirection(ReprojectedPixelCoord);
 			
 			float3 WorldPos = View.PrevTranslatedWorldCameraOrigin + Taps[1].Depth * Direction;
 			Taps[1].Depth = length(WorldPos - CanonicalRay.Origin);
@@ -196,7 +220,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 			for (uint j = 0; j < NumUsedReservoirs; j++)
 			{
 				// Select domain
-				uint2 TapPos_j = (j == 0) ? PixelCoord : ReprojectedScreenPos;
+				uint2 TapPos_j = (j == 0) ? PixelCoord : ReprojectedPixelCoord;
 				float CorrectedM = min(MaxPrevM, Taps[j].M);
 
 				K += CorrectedM;
@@ -232,7 +256,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 					}
 					else
 					{
-						LoadExtraBounces<false>(ReprojectedScreenPos, Taps[i].NumExtraBounces, Bounces);
+						LoadExtraBounces<false>(ReprojectedPixelCoord, Taps[i].NumExtraBounces, Bounces);
 					}
 #endif
 
@@ -283,6 +307,15 @@ MISWeight;
 	if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_TEMPORAL_REUSE)
 	{
 		RWDebugTexture[PixelCoord] = (SelectedId == 0) ? float3(1, 0, 0) : float3(0, 1, 0);
+	}
+	else if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_REPROJECTION)
+	{
+		// Saturates at 25 pixel radius
+		RWDebugTexture[PixelCoord] = float3(saturate(abs(float2(PixelCoord) - float2(ReprojectedPixelCoord)) / 25.0f), 0);
+	}
+	if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_CUSTOM)
+	{
+		RWDebugTexture[PixelCoord] = OutReservoir.RunningSum > 0 ? Debug : 0;
 	}
 #endif
 }
