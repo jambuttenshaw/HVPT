@@ -31,8 +31,7 @@
 // --- LIGHTING 
 //
 
-template<
-bool bIsFinalShading>
+template<bool bIsFinalShading>
 float3 HVPT_CalculateTransmittance(FRayDesc Ray, inout RandomSequence RandSequence, out bool bEscaped)
 {
 	float3 Transmittance;
@@ -121,8 +120,7 @@ float3 HVPT_CalculateLightVisibility(float3 TranslatedWorldPos, FLightSample Lig
 // --- ReSTIR PATH EVALUATION
 //
 
-template<
-bool bIsFinalShading>
+template<bool bIsFinalShading>
 float3 HVPT_EvaluateF(
 	FHVPT_Reservoir Reservoir,
 #if MULTIPLE_BOUNCES
@@ -229,32 +227,30 @@ float3 HVPT_EvaluateF(
 		}
 	}
 	else
-	{
 #endif // USE_SURFACE_CONTRIBUTIONS
 #endif // MULTIPLE_BOUNCES
-
-	// Calculate illumination from light
-	if (Reservoir.bEmissionPath)
 	{
-		float3 SigmaA = (Properties.SigmaT - Properties.SigmaSHG);
-		F *= /*SigmaA * */Properties.Emission;
-	}
-	else
-	{
-		// It is scattering path
-		// Calculate light from light source and then calculate transmittance to that light source
-		FLightSample LightSample = SampleLight(Reservoir.LightId, Reservoir.LightSample, TranslatedWorldPos, 0);
-		float3 LightRadiance = LightSample.RadianceOverPdf * LightSample.Pdf;
 
-		float Phase = HenyeyGreensteinPhase(Properties.PhaseG, dot(-Ray.Direction, LightSample.Direction));
-		float3 ScatterVisibility = HVPT_CalculateLightVisibility < bIsFinalShading > (TranslatedWorldPos, LightSample, RandSequence);
+		// Calculate illumination from light
+		if (Reservoir.bEmissionPath)
+		{
+			float3 SigmaA = (Properties.SigmaT - Properties.SigmaSHG);
+			F *= /*SigmaA * */Properties.Emission;
+		}
+		else
+		{
+			// It is scattering path
+			// Calculate light from light source and then calculate transmittance to that light source
+			FLightSample LightSample = SampleLight(Reservoir.LightId, Reservoir.LightSample, TranslatedWorldPos, 0);
+			float3 LightRadiance = LightSample.RadianceOverPdf * LightSample.Pdf;
 
-		F *= ScatterVisibility * Properties.SigmaSHG * Phase * LightRadiance;
+			float Phase = HenyeyGreensteinPhase(Properties.PhaseG, dot(-Ray.Direction, LightSample.Direction));
+			float3 ScatterVisibility = HVPT_CalculateLightVisibility<bIsFinalShading>(TranslatedWorldPos, LightSample, RandSequence);
+
+			F *= ScatterVisibility * Properties.SigmaSHG * Phase * LightRadiance;
+		}
 	}
 
-#if MULTIPLE_BOUNCES && USE_SURFACE_CONTRIBUTIONS
-	}
-#endif
 	return F;
 }
 

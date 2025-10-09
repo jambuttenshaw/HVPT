@@ -24,7 +24,9 @@ void HVPT_ResampleNeighbour(
 
 	float Weight = P_y_hat / Tap.P_y;
 	if (isinf(Weight) || isnan(Weight))
+	{
 		Weight = 0.0f;
+	}
 
 	Tap.RunningSum *= Weight;
 	Tap.P_y = P_y_hat;

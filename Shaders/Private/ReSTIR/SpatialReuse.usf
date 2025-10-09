@@ -37,6 +37,13 @@ StructuredBuffer<FHVPT_Bounce> InExtraBounces;
 RWStructuredBuffer<FHVPT_Reservoir> RWOutReservoirs;
 RWStructuredBuffer<FHVPT_Bounce> RWOutExtraBounces;
 
+float MISClamp;
+
+// Debug tools
+uint DebugFlags;
+RWTexture2D<float3> RWDebugTexture;
+
+
 bool IsWithinRange(int2 pos, uint2 range)
 {
 	return all(pos >= 0) && all(pos < range);
@@ -153,7 +160,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 
 					if (j == 0)
 					{
-						PQi += Tap.P_y;
+						PQi = Tap.P_y;
 						PSum += Tap.P_y * Tap_j.M;
 					}
 					else if (i == j)
@@ -163,9 +170,14 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 					}
 					else
 					{
-						FRayDesc NeighbourRay = (FRayDesc)0;
-						NeighbourRay.Origin = CanonicalRay.Origin;
-						NeighbourRay.Direction = HVPT_GetRayDirection(TapPos_j);
+						FRayDesc NeighbourRay = HVPT_CreateRayDesc(
+							CanonicalRay.Origin,
+							HVPT_GetRayDirection(TapPos_j)
+						);
+
+#if MULTIPLE_BOUNCES
+						if (i == 0) LoadExtraBounces(Tap.SampledPixel, Tap.NumExtraBounces, Bounces);
+#endif
 
 						float P_y = Luminance(HVPT_EvaluateF<false>(Tap,
 #if MULTIPLE_BOUNCES
@@ -174,14 +186,19 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 							NeighbourRay,
 							RandSequence));
 						if (isinf(P_y) || isnan(P_y))
+						{
 							P_y = 0.0f;
-
+						}
 						PSum += P_y * Tap_j.M;
 					}
 				}
 
-				if (PSum > 0.0f)
-					MISWeight = PQi * K / PSum;
+				MISWeight = 
+					PSum > 0.0f ?
+					clamp(
+					PQi * K / PSum
+					, 0, MISClamp)
+					: 0.0f;
 			}
 #endif
 

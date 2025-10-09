@@ -30,6 +30,10 @@ uint NumInitialCandidates;
 RWStructuredBuffer<FHVPT_Reservoir> RWCurrentReservoirs;
 RWStructuredBuffer<FHVPT_Bounce> RWExtraBounces;
 
+// Debug tools
+uint DebugFlags;
+RWTexture2D<float3> RWDebugTexture;
+
 
 // TODO: Handle early return when light PDF is 0
 #if USE_SURFACE_CONTRIBUTIONS
@@ -303,7 +307,7 @@ FHVPT_Reservoir ComputeInitialSample(
 					OutReservoir.RunningSum = (PSrc == 0.0f) ? 0.0f : 1.0f;
 					OutReservoir.P_y = PSrc;
 
-					float P_y;
+					float P_y = 0.0f;
 					PathPHat *= Luminance(TrackingResult.Transmittance);
 
 #if USE_SURFACE_CONTRIBUTIONS
@@ -449,7 +453,7 @@ FHVPT_Reservoir FinalReservoir = HVPT_CreateNewReservoir();
 #endif
 			PrimaryRay, RandSequence));
 		FinalReservoir.RunningSum *= (FinalReservoir.P_y == 0.0f) ? 0.0f : PHat / FinalReservoir.P_y;
-		FinalReservoir.P_y = PHat;	
+		FinalReservoir.P_y = PHat;
 	}
 
 	// Output reservoir

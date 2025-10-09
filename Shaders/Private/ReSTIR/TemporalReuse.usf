@@ -32,6 +32,7 @@ RWStructuredBuffer<FHVPT_Reservoir> RWCurrentReservoirs;
 RWStructuredBuffer<FHVPT_Bounce> RWCurrentExtraBounces;
 
 float TemporalHistoryThreshold;
+float MISClamp;
 
 // Debug tools
 uint DebugFlags;
@@ -71,12 +72,13 @@ void WriteExtraBounces(uint2 PixelCoord, uint NumBounces, FHVPT_Bounce Bounces[M
 
 float3 ComputePreviousFrameRayDirection(uint2 Pixel)
 {
-	// Un-project using previous frames view projection matrix
-	float4 TranslatedWorldPosition = mul(float4(Pixel + 0.5f, 1, 1), View.PrevScreenToTranslatedWorld);
-	TranslatedWorldPosition.xyz /= TranslatedWorldPosition.w;
-	float3 Direction = normalize(TranslatedWorldPosition.xyz - View.PrevTranslatedWorldCameraOrigin);
+	float2 ScreenPos = float2(Pixel) + HVPT_GetSubpixelJitter();
+	float2 ClipPos = float2(2.0f * ScreenPos.x * View.ViewSizeAndInvSize.z - 1, 1 - 2.0f * ScreenPos.y * View.ViewSizeAndInvSize.w);
+	float4 ViewPosition = mul(float4(ClipPos, 1, 1), View.PrevClipToView);
+	ViewPosition.xyz /= ViewPosition.w;
+	float4 TranslatedWorldPosition = mul(ViewPosition, View.PrevViewToTranslatedWorld);
 
-	return Direction;
+	return normalize(TranslatedWorldPosition.xyz - View.PrevTranslatedWorldCameraOrigin.xyz);
 }
 
 
@@ -106,8 +108,6 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 	bool bBackgroundReservoir = FeatureTransmittance == 1.0f;
 
 	bool bUseFallbackReservoir = true;
-
-	float3 Debug = 0.0f;
 
 	// Reprojection
 	if (false)
@@ -215,9 +215,10 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 				else // resample in neighbours domain (canonical in temporal and temporal in canonical)
 				{
 					// Create camera ray using previous frames camera properties
-					FRayDesc ReprojectedRay = (FRayDesc)0;
-					ReprojectedRay.Origin = View.PrevTranslatedWorldCameraOrigin;
-					ReprojectedRay.Direction = ComputePreviousFrameRayDirection(TapPos_j);
+					FRayDesc ReprojectedRay = HVPT_CreateRayDesc(
+						View.PrevTranslatedWorldCameraOrigin, 
+						ComputePreviousFrameRayDirection(TapPos_j)
+					);
 
 					float UsedDepth = (i == 0) // Note: j is always 1 in this branch
 									? CanonicalSampleDepthInPrevFrame		// Canonical sample in temporal domain
@@ -227,9 +228,13 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 
 #if MULTIPLE_BOUNCES
 					if (i == 0)
+					{
 						LoadExtraBounces<true>(PixelCoord, Taps[i].NumExtraBounces, Bounces);
+					}
 					else
+					{
 						LoadExtraBounces<false>(ReprojectedScreenPos, Taps[i].NumExtraBounces, Bounces);
+					}
 #endif
 
 					float P_y = Luminance(HVPT_EvaluateF<false>(Taps[i],
@@ -241,17 +246,23 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 
 					Taps[i].Depth = BackupDepth;
 					if (isinf(P_y) || isnan(P_y))
+					{
 						P_y = 0.0f;
+					}
 					PSum += P_y * CorrectedM;
 				}
 			}
 
-			if (PSum > 0.0f)
-				MISWeight = PQi * K / PSum;
+			MISWeight = PSum > 0.0f ?
+				clamp(
+				PQi * K / PSum
+				, 0, MISClamp)
+				: 0.0f;
 		}
 #endif
 
-		Taps[i].RunningSum *= MISWeight;
+		Taps[i].RunningSum *=
+MISWeight;
 
 		if (HVPT_SimpleResampleStep<true>(Taps[i], OutReservoir, RandomSequence_GenerateSample1D(RandSequence), MaxPrevM))
 		{
@@ -278,10 +289,5 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 	{
 		RWDebugTexture[PixelCoord] = (SelectedId == 0) ? float3(1, 0, 0) : float3(0, 1, 0);
 	}
-	else if ((DebugFlags & 0XFF) == HVPT_DEBUG_VIEW_MODE_CUSTOM)
-	{
-		RWDebugTexture[PixelCoord] = HasSelection ? Debug : 0.0f;
-	}
-	
 #endif
 }

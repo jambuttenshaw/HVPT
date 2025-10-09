@@ -16,6 +16,14 @@
 #include "Helpers.h"
 
 
+static TAutoConsoleVariable<float> CVarHVPTReSTIRMISClamp(
+	TEXT("r.HVPT.ReSTIR.MISClamp"),
+	20.0f,
+	TEXT("Clamps MIS weights to stop numerical explosion."),
+	ECVF_RenderThreadSafe
+);
+
+
 // Max bounces supported by ReSTIR pipeline
 constexpr uint32 kReSTIRMaxBounces = 8;
 constexpr uint32 kReSTIRMaxSpatialSamples = 8;
@@ -140,6 +148,7 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Bounce>, RWCurrentExtraBounces)
 
 		SHADER_PARAMETER(float, TemporalHistoryThreshold)
+		SHADER_PARAMETER(float, MISClamp)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -172,6 +181,8 @@ public:
 
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Reservoir>, RWOutReservoirs)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Bounce>, RWOutExtraBounces)
+
+		SHADER_PARAMETER(float, MISClamp)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -342,6 +353,9 @@ void HVPT::RenderWithReSTIRPathTracing(
 	FRDGBufferRef ReservoirsA = GraphBuilder.CreateBuffer(ReservoirDesc, TEXT("HeterogeneousVolumes.ReservoirsA"));
 	FRDGBufferRef ExtraBouncesA = GraphBuilder.CreateBuffer(ExtraBounceDesc, TEXT("HeterogeneousVolumes.ExtraBouncesA"));
 
+	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ReservoirsA), 0);
+	AddClearUAVFloatPass(GraphBuilder, GraphBuilder.CreateUAV(ExtraBouncesA), 0.0f);
+
 	FRDGBufferRef ReservoirsB;
 	FRDGBufferRef ExtraBouncesB;
 	bool bValidHistory = (State.ReSTIRReservoirCache.IsValid() && State.ReSTIRReservoirCache->Desc == ReservoirDesc)
@@ -356,6 +370,9 @@ void HVPT::RenderWithReSTIRPathTracing(
 		// No valid history - create empty buffers
 		ReservoirsB = GraphBuilder.CreateBuffer(ReservoirDesc, TEXT("HeterogeneousVolumes.ReservoirsB"));
 		ExtraBouncesB = GraphBuilder.CreateBuffer(ExtraBounceDesc, TEXT("HeterogeneousVolumes.ExtraBouncesB"));
+
+		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ReservoirsA), 0);
+		AddClearUAVFloatPass(GraphBuilder, GraphBuilder.CreateUAV(ExtraBouncesA), 0.0f);
 	}
 
 	// Creating light parameters can be done once and reused between passes
@@ -440,6 +457,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 		PassParameters->RWCurrentExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesA);
 
 		PassParameters->TemporalHistoryThreshold = HVPT::GetTemporalReuseHistoryThreshold();
+		PassParameters->MISClamp = CVarHVPTReSTIRMISClamp.GetValueOnRenderThread();
 
 		FReSTIRTemporalReuseRGS::FPermutationDomain Permutation;
 		Permutation.Set<FReSTIRTemporalReuseRGS::FTalbotMIS>(HVPT::GetTemporalReuseMISEnabled());
@@ -472,6 +490,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 		PassParameters->RWOutReservoirs = GraphBuilder.CreateUAV(ReservoirsB);
 		PassParameters->RWOutExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesB);
 
+		PassParameters->MISClamp = CVarHVPTReSTIRMISClamp.GetValueOnRenderThread();
+
 		FReSTIRSpatialReuseRGS::FPermutationDomain Permutation;
 		Permutation.Set<FReSTIRSpatialReuseRGS::FTalbotMIS>(HVPT::GetSpatialReuseMISEnabled());
 		AddRaytracingPass<FReSTIRSpatialReuseRGS>(
@@ -485,9 +505,11 @@ void HVPT::RenderWithReSTIRPathTracing(
 	}
 	else
 	{
-		// Swap buffers since spatial reuse is not active
-		ReservoirsB = ReservoirsA;
-		ExtraBouncesB = ExtraBouncesA;
+		uint64 NumBytes = static_cast<uint64>(ReservoirsB->Desc.BytesPerElement * ReservoirsB->Desc.NumElements);
+		AddCopyBufferPass(GraphBuilder, ReservoirsB, 0, ReservoirsA, 0, NumBytes);
+
+		NumBytes = static_cast<uint64>(ExtraBouncesB->Desc.BytesPerElement * ExtraBouncesB->Desc.NumElements);
+		AddCopyBufferPass(GraphBuilder, ExtraBouncesB, 0, ExtraBouncesA, 0, NumBytes);
 	}
 
 	// Final Shading

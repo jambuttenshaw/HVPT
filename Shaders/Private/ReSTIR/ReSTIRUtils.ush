@@ -42,70 +42,6 @@ float3 HVPT_GetRayDirection(uint2 PixelCoord)
 // --- RESERVOIR HELPER FUNCTIONS ---
 //
 
-bool HVPT_UpdateReservoir(inout FHVPT_Reservoir Reservoir, float p, float p_hat, float RandValue)
-{
-	// Handle null samples
-	if (p == 0.0f)
-	{
-		Reservoir.M++;
-		return false;
-	}
-
-	float w = p_hat / p;
-	Reservoir.RunningSum += w;
-	Reservoir.M++;
-
-	if (RandValue < w / Reservoir.RunningSum)
-	{
-		Reservoir.P_y = p_hat;
-		return true;
-	}
-
-	return false;
-}
-
-template<bool bThresholdM=false>
-bool HVPT_CombineReservoirs(inout FHVPT_Reservoir Reservoir, FHVPT_Reservoir r_i, float p_hat, float m, float RandValue, float ThresholdM = 0.0f)
-{
-	float weight = (p_hat / r_i.P_y);
-	if (isinf(weight) || isnan(weight))
-		weight = 0.0f;
-	Reservoir.RunningSum *= weight * m;
-
-	float CorrectedM, SampleWeight;
-	if (bThresholdM)
-	{
-		CorrectedM = min(ThresholdM, r_i.M);
-		SampleWeight = CorrectedM == 0.0f ? 0.0f : CorrectedM / r_i.M * r_i.RunningSum;
-	}
-	else
-	{
-		CorrectedM = r_i.M;
-		SampleWeight = r_i.RunningSum;
-	}
-
-	Reservoir.M += CorrectedM;
-
-	// Handle null samples
-	if (SampleWeight == 0.0f)
-	{
-		return false;
-	}
-
-	float w = SampleWeight;
-
-	Reservoir.RunningSum += w;
-
-	if (RandValue < w / SampleWeight)
-	{
-		Reservoir.P_y = p_hat;
-		return true;
-	}
-
-	return false;
-}
-
-
 FHVPT_Reservoir HVPT_CreateNewReservoir()
 {
 	FHVPT_Reservoir OutReservoir = (FHVPT_Reservoir)0;
@@ -118,6 +54,7 @@ FHVPT_Reservoir HVPT_CreateNewReservoir()
 	OutReservoir.LightSample = 0.0f;
 	OutReservoir.NumExtraBounces = 0;
 	OutReservoir.SampledPixel = 0;
+	OutReservoir.Origin = -1;
 	return OutReservoir;
 }
 
@@ -128,7 +65,7 @@ bool HVPT_SimpleResampleStep(FHVPT_Reservoir Reservoir, inout FHVPT_Reservoir St
 	if (bThresholdM)
 	{
 		CorrectedM = min(MThreshold, Reservoir.M);
-		SampleWeight = CorrectedM == 0.0f ? 0.0f : CorrectedM / Reservoir.M * Reservoir.RunningSum;
+		SampleWeight = CorrectedM / Reservoir.M * Reservoir.RunningSum;
 	}
 	else
 	{

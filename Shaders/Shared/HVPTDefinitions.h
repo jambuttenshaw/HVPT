@@ -52,6 +52,7 @@ struct FHVPT_Bounce
 #define HVPT_DEBUG_VIEW_MODE_PATH_TYPE			0x01		// Scattering vs Emission
 #define HVPT_DEBUG_VIEW_MODE_LIGHT_ID			0x02
 #define HVPT_DEBUG_VIEW_MODE_TEMPORAL_REUSE		0x03		// Whether temporal sample was selected
+#define HVPT_DEBUG_VIEW_MODE_FIREFLY_DETECTION	0x04		// Visualize when sum in reservoirs is very high to detect fireflies
 
 #define HVPT_DEBUG_VIEW_MODE_CUSTOM				0xFF		// Used for temporary debug visualization
 
