@@ -32,7 +32,6 @@ RWStructuredBuffer<FHVPT_Reservoir> RWCurrentReservoirs;
 RWStructuredBuffer<FHVPT_Bounce> RWCurrentExtraBounces;
 
 float TemporalHistoryThreshold;
-float MISClamp;
 
 // Debug tools
 uint DebugFlags;
@@ -253,11 +252,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 				}
 			}
 
-			MISWeight = PSum > 0.0f ?
-				clamp(
-				PQi * K / PSum
-				, 0, MISClamp)
-				: 0.0f;
+			MISWeight = PSum > 0.0f ? PQi * K / PSum : 0.0f;
 		}
 #endif
 

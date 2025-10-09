@@ -54,7 +54,6 @@ FHVPT_Reservoir HVPT_CreateNewReservoir()
 	OutReservoir.LightSample = 0.0f;
 	OutReservoir.NumExtraBounces = 0;
 	OutReservoir.SampledPixel = 0;
-	OutReservoir.Origin = -1;
 	return OutReservoir;
 }
 

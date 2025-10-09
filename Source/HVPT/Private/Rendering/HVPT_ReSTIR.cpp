@@ -15,15 +15,6 @@
 #include "RayTracingShaderBindingLayout.h"
 #include "Helpers.h"
 
-
-static TAutoConsoleVariable<float> CVarHVPTReSTIRMISClamp(
-	TEXT("r.HVPT.ReSTIR.MISClamp"),
-	20.0f,
-	TEXT("Clamps MIS weights to stop numerical explosion."),
-	ECVF_RenderThreadSafe
-);
-
-
 // Max bounces supported by ReSTIR pipeline
 constexpr uint32 kReSTIRMaxBounces = 8;
 constexpr uint32 kReSTIRMaxSpatialSamples = 8;
@@ -148,7 +139,6 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Bounce>, RWCurrentExtraBounces)
 
 		SHADER_PARAMETER(float, TemporalHistoryThreshold)
-		SHADER_PARAMETER(float, MISClamp)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -181,8 +171,6 @@ public:
 
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Reservoir>, RWOutReservoirs)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Bounce>, RWOutExtraBounces)
-
-		SHADER_PARAMETER(float, MISClamp)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -457,7 +445,6 @@ void HVPT::RenderWithReSTIRPathTracing(
 		PassParameters->RWCurrentExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesA);
 
 		PassParameters->TemporalHistoryThreshold = HVPT::GetTemporalReuseHistoryThreshold();
-		PassParameters->MISClamp = CVarHVPTReSTIRMISClamp.GetValueOnRenderThread();
 
 		FReSTIRTemporalReuseRGS::FPermutationDomain Permutation;
 		Permutation.Set<FReSTIRTemporalReuseRGS::FTalbotMIS>(HVPT::GetTemporalReuseMISEnabled());
@@ -489,9 +476,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 		PassParameters->RWOutReservoirs = GraphBuilder.CreateUAV(ReservoirsB);
 		PassParameters->RWOutExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesB);
-
-		PassParameters->MISClamp = CVarHVPTReSTIRMISClamp.GetValueOnRenderThread();
-
+		
 		FReSTIRSpatialReuseRGS::FPermutationDomain Permutation;
 		Permutation.Set<FReSTIRSpatialReuseRGS::FTalbotMIS>(HVPT::GetSpatialReuseMISEnabled());
 		AddRaytracingPass<FReSTIRSpatialReuseRGS>(
