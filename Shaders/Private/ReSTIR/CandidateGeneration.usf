@@ -166,53 +166,47 @@ FHVPT_Reservoir ComputeInitialSample(
 			float3 Albedo = TrackingResult.SigmaS / TrackingResult.SigmaT;
 			float3 OneMinusAlbedo = 1.0f - Albedo;
 
-			// Include emission if volume has emission
-			float3 Le = 0.0f;
-			if (any(TrackingResult.Emission > 0.0f) && any(TrackingResult.SigmaT > 0.0f) && bVolumeInteractionValid)
-			{
-				Le = TrackingResult.Emission;
-			}
-
 			float OutLightPDF = 0.0f;
 			float3 Ld = SampleDirectLighting(
 				Ray, TrackingResult, TranslatedWorldPos, true, RandSequence, OutLightPDF, OutReservoir.LightId, OutReservoir.LightSample
 			);
+			float3 Le = TrackingResult.Emission;
 
-			// Perform RIS step
+			// Perform RIS step between emission and in-scattering
 			float EmissionWeight = Luminance(OneMinusAlbedo * Le);
 			float EmissionRatio = EmissionWeight / (EmissionWeight + Luminance(Albedo * Ld));
 			if (isnan(EmissionRatio))
 				EmissionRatio = 0.0f;
 
-			// Sample between emission and in-scattering
 			if (RandomSequence_GenerateSample1D(RandSequence) < EmissionRatio)
 			{
+				// Emission was selected
 				CandidatePDF *= EmissionRatio;
 				OutReservoir.bEmissionPath = true;
 			}
 			else
 			{
+				// Scattering was selected
 				CandidatePDF *= OutLightPDF * (1.0f - EmissionRatio);
 			}
 
-			float P_y = 0.0f;
-
-			if (OutReservoir.bEmissionPath)
-			{
-				float3 SigmaA = TrackingResult.SigmaT - TrackingResult.SigmaS;
-				P_y = PathPHat * Luminance(SigmaA * Le);
-			}
-			else
-			{
-				// Ld is pre-divided by PDF
-				P_y = PathPHat * Luminance(TrackingResult.SigmaS * Ld * OutLightPDF);
-			}
-
+			// Calculate target function for this sample
 			// If PDF is 0 then no problem - OutReservoir.RunningSum will be 0 and this reservoir will not be chosen
 			if (CandidatePDF > 0.0f)
 			{
-				OutReservoir.RunningSum = P_y / CandidatePDF;
-				OutReservoir.P_y = P_y;
+				if (OutReservoir.bEmissionPath)
+				{
+					float3 SigmaA = TrackingResult.SigmaT - TrackingResult.SigmaS;
+					OutReservoir.P_y = PathPHat * Luminance(SigmaA * Le);
+				}
+				else
+				{
+					// Ld is pre-divided by PDF
+					OutReservoir.P_y = PathPHat * Luminance(TrackingResult.SigmaS * Ld * OutLightPDF);
+				}
+
+				// Calculate weight for this sample
+				OutReservoir.RunningSum = OutReservoir.P_y / CandidatePDF;
 			}
 
 #if MULTIPLE_BOUNCES
@@ -262,8 +256,10 @@ FHVPT_Reservoir ComputeInitialSample(
 				// Didn't hit surface
 				OutReservoir.RunningSum = 0.0f;
 				OutReservoir.P_y = 0.0f;
-				bHitEmpty = true;
 			}
+
+			// Regardless of surface hit or not, we do not want to perform subsequent bounces off of surfaces
+			bHitEmpty = true;
 		}
 #endif
 		else
