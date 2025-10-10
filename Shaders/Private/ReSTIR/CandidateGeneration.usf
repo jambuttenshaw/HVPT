@@ -106,8 +106,7 @@ FHVPT_Reservoir ComputeInitialSample(
 #if MULTIPLE_BOUNCES
 	inout FHVPT_Bounce ExtraBounces[MAX_EXTRA_BOUNCES],
 #endif
-	inout RandomSequence RandSequence,
-	inout float3 Debug
+	inout RandomSequence RandSequence
 )
 {
 	float PathPDF = 1.0f;
@@ -250,6 +249,39 @@ FHVPT_Reservoir ComputeInitialSample(
 
 				// Hit surface - find candidate paths that either sample emissive surface or sample direct light that bounces off surface
 				// In path evaluation, surface hit is denoted by Distance == POSITIVE_INFINITY
+
+				float3 Albedo = Payload.GetBaseColor();
+				float3 OneMinusAlbedo = 1.0f - Albedo;
+
+				float OutLightPDF = 0.0f;
+				float3 Ld = SampleDirectLightingSurface(
+					Ray, Payload, true, RandSequence, OutLightPDF, OutReservoir.LightId, OutReservoir.LightSample
+				);
+				float3 Le = Payload.Radiance;
+
+				// Perform RIS step between emission and in-scattering
+				float EmissionWeight = Luminance(OneMinusAlbedo * Le);
+				float EmissionRatio = EmissionWeight / (EmissionWeight + Luminance(Albedo * Ld));
+				if (isnan(EmissionRatio))
+					EmissionRatio = 0.0f;
+
+				if (RandomSequence_GenerateSample1D(RandSequence) < EmissionRatio)
+				{
+					PathPDF *= EmissionRatio;
+					OutReservoir.bEmissionPath = true;
+				}
+				else
+				{
+					PathPDF *= OutLightPDF * (1.0f - EmissionRatio);
+				}
+
+				// Calculate target function for this sample
+				// If PDF is 0 then no problem - OutReservoir.RunningSum will be 0 and this reservoir will not be chosen
+				if (PathPDF > 0.0f)
+				{
+					OutReservoir.P_y = PathPHat * Luminance(OutReservoir.bEmissionPath ? Le : Ld * OutLightPDF);
+					OutReservoir.RunningSum = OutReservoir.P_y / PathPDF;
+				}
 			}
 			else
 			{
@@ -293,8 +325,6 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 	uint2 PixelCoord = DispatchRaysIndex().xy;
 	FHVPT_Reservoir FinalReservoir = HVPT_CreateNewReservoir();
 
-	float3 Debug = 0.0f;
-
 #if MULTIPLE_BOUNCES
 	FHVPT_Bounce FinalExtraBounces[MAX_EXTRA_BOUNCES];
 #endif
@@ -331,8 +361,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 #if MULTIPLE_BOUNCES
 			OutBounces, 
 #endif
-			RandSequence,
-			Debug);
+			RandSequence);
 
 		bool bSelected = HVPT_SimpleResampleStep<false>(OutReservoir, FinalReservoir, RandomSequence_GenerateSample1D(RandSequence));
 
@@ -372,13 +401,6 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 	for (uint i = 0; i < FinalReservoir.NumExtraBounces; i++)
 	{
 		RWExtraBounces[ExtraBounceIndex + i] = FinalExtraBounces[i];
-	}
-#endif
-
-#if DEBUG_OUTPUT_ENABLED
-	if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_CUSTOM)
-	{
-		RWDebugTexture[PixelCoord] = Debug;
 	}
 #endif
 }
