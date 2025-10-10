@@ -111,6 +111,13 @@ static TAutoConsoleVariable<float> CVarHVPTReSTIRTemporalReuseHistoryThreshold(
 	ECVF_RenderThreadSafe
 );
 
+static TAutoConsoleVariable<bool> CVarHVPTReSTIRTemporalReprojection(
+	TEXT("r.HVPT.ReSTIR.TemporalReprojection"),
+	true,
+	TEXT("Enable temporal reprojection when selecting a sample from previous frames reservoirs for resampling."),
+	ECVF_RenderThreadSafe
+);
+
 static TAutoConsoleVariable<int32> CVarHVPTReSTIRSpatialReuseSamples(
 	TEXT("r.HVPT.ReSTIR.SpatialReuse.NumSamples"),
 	0,
@@ -381,6 +388,11 @@ namespace HVPT
 	float GetTemporalReuseHistoryThreshold()
 	{
 		return CVarHVPTReSTIRTemporalReuseHistoryThreshold.GetValueOnRenderThread();
+	}
+
+	bool GetTemporalReprojectionEnabled()
+	{
+		return CVarHVPTReSTIRTemporalReprojection.GetValueOnRenderThread();
 	}
 
 	bool GetSpatialReuseEnabled()

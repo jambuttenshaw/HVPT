@@ -32,6 +32,7 @@ RWStructuredBuffer<FHVPT_Reservoir> RWCurrentReservoirs;
 RWStructuredBuffer<FHVPT_Bounce> RWCurrentExtraBounces;
 
 float TemporalHistoryThreshold;
+uint bEnableTemporalReprojection;
 
 // Debug tools
 uint DebugFlags;
@@ -107,6 +108,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 	bool bBackgroundReservoir = FeatureTransmittance == 1.0f;
 
 	// Reprojection
+	if (bEnableTemporalReprojection)
 	{
 		float ReprojectionDepth = Taps[0].Depth;
 		if (ReprojectionDepth == POSITIVE_INFINITY)
