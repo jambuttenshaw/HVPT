@@ -24,6 +24,7 @@ Texture2D<float4> GBufferVelocityTexture;
 uint TemporalSeed;
 
 Texture2D<float2> FeatureTexture;
+Texture2D<float2> TemporalFeatureTexture;
 
 StructuredBuffer<FHVPT_Reservoir> PreviousReservoirs;
 StructuredBuffer<FHVPT_Bounce> PreviousExtraBounces;
@@ -105,7 +106,6 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 	uint2 ReprojectedPixelCoord = PixelCoord;
 
 	float FeatureTransmittance = FeatureTexture[PixelCoord].r;
-	bool bBackgroundReservoir = FeatureTransmittance == 1.0f;
 
 	// Reprojection
 	if (bEnableTemporalReprojection)
@@ -139,6 +139,12 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 			if (all(ScreenPosI >= 0) && all(ScreenPosI < View.ViewSizeAndInvSize.xy))
 			{
 				ReprojectedPixelCoord = uint2(ScreenPosI);
+			}
+
+			float TemporalFeatureTransmittance = TemporalFeatureTexture[ReprojectedPixelCoord];
+			if (FeatureTransmittance == 1.0f && TemporalFeatureTransmittance != 1.0f)
+			{
+				return;
 			}
 		}
 	}

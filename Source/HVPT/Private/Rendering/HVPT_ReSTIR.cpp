@@ -131,6 +131,7 @@ public:
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
 
 		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float2>, FeatureTexture)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float2>, TemporalFeatureTexture)
 
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Reservoir>, PreviousReservoirs)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Bounce>, PreviousExtraBounces)
@@ -334,6 +335,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 	// Create resources
 	const auto& Extent = ViewInfo.ViewRect.Size();
 
+	bool bHasTemporalFeatureTexture = State.TemporalFeatureTexture != nullptr;
+
 	auto ReservoirDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(FHVPT_Reservoir), Extent.X * Extent.Y);
 	// When max bounces is 1 then extra bounce buffer is not needed - just creates buffer with 1 element
 	auto ExtraBounceDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(FHVPT_Bounce),
@@ -438,6 +441,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 		PopulateCommonParameters(&PassParameters->Common, 1);
 
 		PassParameters->FeatureTexture = GraphBuilder.CreateSRV(State.FeatureTexture);
+		PassParameters->TemporalFeatureTexture = GraphBuilder.CreateSRV(bHasTemporalFeatureTexture ? State.TemporalFeatureTexture : GSystemTextures.GetBlackDummy(GraphBuilder));
 
 		PassParameters->PreviousReservoirs = GraphBuilder.CreateSRV(ReservoirsB);
 		PassParameters->PreviousExtraBounces = GraphBuilder.CreateSRV(ExtraBouncesB);
@@ -446,7 +450,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 		PassParameters->RWCurrentExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesA);
 
 		PassParameters->TemporalHistoryThreshold = HVPT::GetTemporalReuseHistoryThreshold();
-		PassParameters->bEnableTemporalReprojection = HVPT::GetTemporalReprojectionEnabled();
+		PassParameters->bEnableTemporalReprojection = HVPT::GetTemporalReprojectionEnabled() && bHasTemporalFeatureTexture;
 
 		FReSTIRTemporalReuseRGS::FPermutationDomain Permutation;
 		Permutation.Set<FReSTIRTemporalReuseRGS::FTalbotMIS>(HVPT::GetTemporalReuseMISEnabled());
@@ -492,6 +496,10 @@ void HVPT::RenderWithReSTIRPathTracing(
 	}
 	else
 	{
+		// Copying when spatial reuse is disabled is not required, but makes debugging much easier as aliasing resources
+		// (when ReservoirsA and ReservoirsB point to the same resource) gets confusing quick.
+		// Plus, the cost of copying these two buffers is very tiny compared to the cost of volumetric path tracing
+		// In practice, spatial reuse should generally be enabled anyway.
 		uint64 NumBytes = static_cast<uint64>(ReservoirsB->Desc.BytesPerElement * ReservoirsB->Desc.NumElements);
 		AddCopyBufferPass(GraphBuilder, ReservoirsB, 0, ReservoirsA, 0, NumBytes);
 
