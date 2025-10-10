@@ -106,7 +106,8 @@ FHVPT_Reservoir ComputeInitialSample(
 #if MULTIPLE_BOUNCES
 	inout FHVPT_Bounce ExtraBounces[MAX_EXTRA_BOUNCES],
 #endif
-	inout RandomSequence RandSequence
+	inout RandomSequence RandSequence,
+	inout float3 Debug
 )
 {
 	float PathPDF = 1.0f;
@@ -125,36 +126,53 @@ FHVPT_Reservoir ComputeInitialSample(
 		OutReservoir = HVPT_CreateNewReservoir();
 		OutReservoir.M = 1;
 
-		// Perform tracking to get a distance into the volume
+#if USE_SURFACE_CONTRIBUTIONS
+		FRayDesc SurfaceRay = Ray;
+		SurfaceRay.TMin = 0.0f;
+		SurfaceRay.TMax = POSITIVE_INFINITY;
 		FRayCone RayCone = (FRayCone)0;
 		FMaterialClosestHitPayload HitInfo = TraceMaterialRay(
 			TLAS,
 			0,
 			PATHTRACER_MASK_ALL,
-			Ray,
+			SurfaceRay,
 			RayCone,
 			false,
 			true,
-			false
+			true
 		);
 		if (HitInfo.IsHit())
 		{
 			Ray.TMax = HitInfo.HitT;
 		}
 
-#if USE_SURFACE_CONTRIBUTIONS
 		FPathTracingPayload Payload = HVPT_CreateSurfaceHitPayload(HitInfo);
 #endif
 
+		FVolumeIntersection VolIntersect = HVPT_Intersect(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
+		Ray.TMin = VolIntersect.VolumeTMin;
+		Ray.TMax = min(Ray.TMax, VolIntersect.VolumeTMax);
+
+		// Perform tracking to get a distance into the volume
 		FHVPT_TrackingResult TrackingResult = HVPT_DeltaTracking(Ray, RandSequence);
 		float PDFDist = Luminance(TrackingResult.SigmaT * TrackingResult.Transmittance);
+
 		bool bVolumeInteractionValid = TrackingResult.Distance != POSITIVE_INFINITY;
+		bool bHitEmpty = false;
+
+		// Shortcut when not including surfaces and the ray escapes the volume
+#if !(USE_SURFACE_CONTRIBUTIONS)
+		if (!bVolumeInteractionValid && Bounce > 0) 
+		{
+			OutReservoir.P_y = 0.0f;
+			OutReservoir.RunningSum = 0.0f;
+			bHitEmpty = true;
+		}
+#endif
 
 		float3 TranslatedWorldPos = Ray.Origin + TrackingResult.Distance * Ray.Direction;
 
 		PathPDF *= PDFDist;
-
-		bool bHitEmpty = false;
 
 		if (Bounce == 0)
 		{
@@ -173,197 +191,115 @@ FHVPT_Reservoir ComputeInitialSample(
 		}
 		OutReservoir.P_y = PathPDF;
 
-		if (
-#if !(USE_SURFACE_CONTRIBUTIONS)
-			(!bVolumeInteractionValid && Bounce > 0) ||
-#endif
-			(bVolumeInteractionValid && all(TrackingResult.SigmaT == 0.0f))
-		)
+		if (bHitEmpty)
 		{
-			OutReservoir.P_y = 0.0f;
-			OutReservoir.RunningSum = 0.0f;
-			bHitEmpty = true;
+			// Do nothing
 		}
-
-		float PDFDir = 1.0f;
-
-		if (!bHitEmpty)
+		else if (bVolumeInteractionValid)
 		{
-			if (bVolumeInteractionValid
-#if USE_SURFACE_CONTRIBUTIONS
-				|| HitInfo.IsHit()
-#endif
-			)
+			float OutLightPDF = 0.0f;
+			float3 Ld = 0.0f;
+			float3 Le = 0.0f;
+
+			// Absorption ratio
+			float3 Albedo = TrackingResult.SigmaS / TrackingResult.SigmaT;
+			float3 OneMinusAlbedo = 1.0f - Albedo;
+
+			// Include emission if volume has emission
+			if (any(TrackingResult.Emission > 0.0f) && any(TrackingResult.SigmaT > 0.0f) && bVolumeInteractionValid)
 			{
-				bool bIsSurfaceHit = !bVolumeInteractionValid;
+				Le = TrackingResult.Emission;
+			}
 
-				float3 Albedo = TrackingResult.SigmaS / TrackingResult.SigmaT;
+			Ld = SampleDirectLighting(
+				Ray, TrackingResult, TranslatedWorldPos, true, RandSequence, OutLightPDF, OutReservoir.LightId, OutReservoir.LightSample
+			);
 
-#if USE_SURFACE_CONTRIBUTIONS
-				if (bIsSurfaceHit)
-				{
-					if (any(Payload.Radiance > 0.0f))
-					{
-						if (Bounce == 0)
-						{
-							float3 Le = Payload.Radiance;
-							PathPHat *= Luminance(TrackingResult.Transmittance);
-							float P_y = PathPHat * Luminance(Le);
-							OutReservoir.RunningSum = P_y / OutReservoir.P_y;
-							OutReservoir.P_y = P_y;
-							OutReservoir.bEmissionPath = true;
-						}
-						else
-						{
-							OutReservoir.RunningSum = 0.0f;
-							OutReservoir.P_y = 0.0f;
-						}
-						bHitEmpty = true;
-					}
-				}
-#endif
-
-				if (!bHitEmpty)
-				{
-					float OutLightPDF = 0.0f;
-					float3 Ld = 0.0f;
-					float3 Le = 0.0f;
-
-					// Absorption ratio
-					float3 OneMinusAlbedo = 1.0f - Albedo;
-					bool bSampleLightOrEmission = true;
-
-					// Include emission if volume has emission
-					if (any(TrackingResult.Emission > 0.0f) && any(TrackingResult.SigmaT > 0.0f) && !bIsSurfaceHit)
-					{
-						Le = TrackingResult.Emission;
-					}
-
-#if USE_SURFACE_CONTRIBUTIONS
-					if (bIsSurfaceHit)
-					{
-						Ld = SampleDirectLightingSurface(
-							Ray, Payload, true, RandSequence, OutLightPDF, OutReservoir.LightId, OutReservoir.LightSample
-						);
-					}
-					else
-#endif
-					{
-						Ld = SampleDirectLighting(
-							Ray, TrackingResult, TranslatedWorldPos, true, RandSequence, OutLightPDF, OutReservoir.LightId, OutReservoir.LightSample
-						);
-					}
-
-					// Select new direction for ray to bounce in
-					float3 wi;
-
-					if (NumBounces > 1)
-					{
-#if USE_SURFACE_CONTRIBUTIONS
-						if (bIsSurfaceHit)
-						{
-							// This will break the loop after this bounce, but still consider a path connecting from the surface hit to a light source
-							bHitEmpty = true;
-						}
-						else
-#endif
-						{
-							// Sample phase function for new scattering direction
-							float4 DirectionAndPDF = ImportanceSampleHenyeyGreensteinPhase(RandomSequence_GenerateSample2D(RandSequence), TrackingResult.PhaseG);
-							wi = TangentToWorld(DirectionAndPDF.xyz, Ray.Direction);
-							PDFDir = DirectionAndPDF.w;
-						}
-					}
-
-					float PSrc = OutReservoir.P_y;
-
-#if USE_SURFACE_CONTRIBUTIONS
-					if (bIsSurfaceHit)
-					{
-						PSrc *= OutLightPDF;
-					}
-					else
-#endif 
-					if (bSampleLightOrEmission)
-					{
-						// Perform RIS step
-						float EmissionWeight = Luminance(OneMinusAlbedo * Le);
-						float EmissionRatio = EmissionWeight / (EmissionWeight + Luminance(Albedo * Ld));
-						if (isnan(EmissionRatio))
-							EmissionRatio = 0.0f;
-
-						// Sample between emission and in-scattering
-						if (RandomSequence_GenerateSample1D(RandSequence) < EmissionRatio)
-						{
-							PSrc *= EmissionRatio;
-							OutReservoir.bEmissionPath = true;
-						}
-						else
-						{
-							PSrc *= OutLightPDF * (1.0f - EmissionRatio);
-						}
-					}
-
-					OutReservoir.RunningSum = (PSrc == 0.0f) ? 0.0f : 1.0f;
-					OutReservoir.P_y = PSrc;
-
-					float P_y = 0.0f;
-					PathPHat *= Luminance(TrackingResult.Transmittance);
-
-#if USE_SURFACE_CONTRIBUTIONS
-					if (bIsSurfaceHit)
-					{
-						// Don't need to do anything here - if surface hit then there won't be another iteration for PathPHat to be used
-					}
-					else
-#endif
-					{
-						PathPHat *= Luminance(TrackingResult.SigmaT);
-						if (OutReservoir.bEmissionPath)
-						{
-							float3 SigmaA = TrackingResult.SigmaT - TrackingResult.SigmaS;
-							P_y = PathPHat * Luminance(SigmaA * Le);
-						}
-						else
-						{
-							// Ld is pre-divided by PDF
-							P_y = PathPHat * Luminance(TrackingResult.SigmaS * Ld * OutLightPDF);
-						}
-
-						PathPHat *= Luminance(TrackingResult.SigmaS) * PDFDir;
-					}
-
-					if (OutReservoir.RunningSum > 0.0f)
-					{
-						OutReservoir.RunningSum = (OutReservoir.P_y == 0.0f) ? 0.0f : P_y / OutReservoir.P_y;
-
-						if (OutReservoir.bEmissionPath && Bounce > 0)
-						{
-							// TODO: Do I need to reflect this in Final Shading?
-							// This makes absorption insanely strong as is at the moment!
-							//P_y /= (TrackingResult.Distance * TrackingResult.Distance);
-						}
-						OutReservoir.P_y = P_y;
-					}
-
-					PathPDF *= PDFDir;
+			// Select new direction for ray to bounce in
+			float3 wi;
+			float PDFDir = 1.0f;
 
 #if MULTIPLE_BOUNCES
-					if (!bHitEmpty && Bounce < NumBounces - 1)
-					{
-						// Create a new ray pointing in the sampled direction
-						Ray = HVPT_CreateRayDesc(TranslatedWorldPos, wi);
-					}
+			if (NumBounces > 1)
+			{
+				// Sample phase function for new scattering direction
+				float4 DirectionAndPDF = ImportanceSampleHenyeyGreensteinPhase(RandomSequence_GenerateSample2D(RandSequence), TrackingResult.PhaseG);
+				wi = TangentToWorld(DirectionAndPDF.xyz, Ray.Direction);
+				PDFDir = DirectionAndPDF.w;
+			}
 #endif
-				}
+
+			// Perform RIS step
+			float EmissionWeight = Luminance(OneMinusAlbedo * Le);
+			float EmissionRatio = EmissionWeight / (EmissionWeight + Luminance(Albedo * Ld));
+			if (isnan(EmissionRatio))
+				EmissionRatio = 0.0f;
+
+			// Sample between emission and in-scattering
+			if (RandomSequence_GenerateSample1D(RandSequence) < EmissionRatio)
+			{
+				OutReservoir.P_y *= EmissionRatio;
+				OutReservoir.bEmissionPath = true;
 			}
 			else
 			{
-				// Didn't hit volume or surface
-				OutReservoir.RunningSum = 0.0f;
-				OutReservoir.P_y = 0.0f;
-				bHitEmpty = true;
+				OutReservoir.P_y *= OutLightPDF * (1.0f - EmissionRatio);
 			}
+
+			OutReservoir.RunningSum = (OutReservoir.P_y == 0.0f) ? 0.0f : 1.0f;
+
+			float P_y = 0.0f;
+			PathPHat *= Luminance(TrackingResult.Transmittance);
+
+			PathPHat *= Luminance(TrackingResult.SigmaT);
+			if (OutReservoir.bEmissionPath)
+			{
+				float3 SigmaA = TrackingResult.SigmaT - TrackingResult.SigmaS;
+				P_y = PathPHat * Luminance(SigmaA * Le);
+			}
+			else
+			{
+				// Ld is pre-divided by PDF
+				P_y = PathPHat * Luminance(TrackingResult.SigmaS * Ld * OutLightPDF);
+			}
+
+			PathPHat *= Luminance(TrackingResult.SigmaS) * PDFDir;
+
+			if (OutReservoir.RunningSum > 0.0f)
+			{
+				OutReservoir.RunningSum = (OutReservoir.P_y == 0.0f) ? 0.0f : P_y / OutReservoir.P_y;
+
+				if (OutReservoir.bEmissionPath && Bounce > 0)
+				{
+					// TODO: Do I need to reflect this in Final Shading?
+					// This makes absorption insanely strong as is at the moment!
+					//P_y /= (TrackingResult.Distance * TrackingResult.Distance);
+				}
+				OutReservoir.P_y = P_y;
+			}
+
+			PathPDF *= PDFDir;
+
+#if MULTIPLE_BOUNCES
+			if (!bHitEmpty && Bounce < NumBounces - 1)
+			{
+				// Create a new ray pointing in the sampled direction
+				Ray = HVPT_CreateRayDesc(TranslatedWorldPos, wi);
+			}
+#endif
+		}
+#if USE_SURFACE_CONTRIBUTIONS
+		else if (HitInfo.IsHit())
+		{
+			
+		}
+#endif
+		else
+		{
+			// Didn't hit volume or surface
+			OutReservoir.RunningSum = 0.0f;
+			OutReservoir.P_y = 0.0f;
+			bHitEmpty = true;
 		}
 
 #if MULTIPLE_BOUNCES
@@ -385,7 +321,9 @@ FHVPT_Reservoir ComputeInitialSample(
 RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 {
 	uint2 PixelCoord = DispatchRaysIndex().xy;
-FHVPT_Reservoir FinalReservoir = HVPT_CreateNewReservoir();
+	FHVPT_Reservoir FinalReservoir = HVPT_CreateNewReservoir();
+
+	float3 Debug = 0.0f;
 
 #if MULTIPLE_BOUNCES
 	FHVPT_Bounce FinalExtraBounces[MAX_EXTRA_BOUNCES];
@@ -403,9 +341,6 @@ FHVPT_Reservoir FinalReservoir = HVPT_CreateNewReservoir();
 		RWCurrentReservoirs[HVPT_GetReservoirIndex(PixelCoord)] = FinalReservoir;
 		return;
 	}
-
-	Ray.TMin = VolIntersect.VolumeTMin;
-	Ray.TMax = VolIntersect.VolumeTMax;
 
 	FRayDesc PrimaryRay = Ray;
 
@@ -425,7 +360,8 @@ FHVPT_Reservoir FinalReservoir = HVPT_CreateNewReservoir();
 #if MULTIPLE_BOUNCES
 			OutBounces, 
 #endif
-			RandSequence);
+			RandSequence,
+			Debug);
 
 		bool bSelected = HVPT_SimpleResampleStep<false>(OutReservoir, FinalReservoir, RandomSequence_GenerateSample1D(RandSequence));
 
@@ -465,6 +401,13 @@ FHVPT_Reservoir FinalReservoir = HVPT_CreateNewReservoir();
 	for (uint i = 0; i < FinalReservoir.NumExtraBounces; i++)
 	{
 		RWExtraBounces[ExtraBounceIndex + i] = FinalExtraBounces[i];
+	}
+#endif
+
+#if DEBUG_OUTPUT_ENABLED
+	if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_CUSTOM)
+	{
+		RWDebugTexture[PixelCoord] = Debug;
 	}
 #endif
 }
