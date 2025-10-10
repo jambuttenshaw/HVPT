@@ -106,8 +106,6 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 	float FeatureTransmittance = FeatureTexture[PixelCoord].r;
 	bool bBackgroundReservoir = FeatureTransmittance == 1.0f;
 
-	float3 Debug = 0;
-
 	// Reprojection
 	{
 		float ReprojectionDepth = Taps[0].Depth;
@@ -124,6 +122,9 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 			// Find previous frame world position if we have velocity data
 			float3 Velocity = HVPT_GetVelocity(WorldPos);
 			WorldPos -= Velocity;
+
+			float3 CameraVelocity = (View.WorldViewOriginHigh + View.WorldViewOriginLow) - (View.PrevWorldViewOriginHigh + View.PrevWorldViewOriginLow);
+			WorldPos -= CameraVelocity;
 
 			float4 ClipPos = mul(float4(WorldPos, 1), View.PrevTranslatedWorldToClip);
 
@@ -311,11 +312,8 @@ MISWeight;
 	else if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_REPROJECTION)
 	{
 		// Saturates at 25 pixel radius
-		RWDebugTexture[PixelCoord] = float3(saturate(abs(float2(PixelCoord) - float2(ReprojectedPixelCoord)) / 25.0f), 0);
-	}
-	if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_CUSTOM)
-	{
-		RWDebugTexture[PixelCoord] = OutReservoir.RunningSum > 0 ? Debug : 0;
+		float2 Diff = (float2(ReprojectedPixelCoord) - float2(PixelCoord)) / 25.0f;
+		RWDebugTexture[PixelCoord] = float3(saturate(Diff * 0.5f + 0.5f), 0);
 	}
 #endif
 }
