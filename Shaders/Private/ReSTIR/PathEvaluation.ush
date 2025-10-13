@@ -157,8 +157,9 @@ float3 HVPT_EvaluateF(
 	// Follow path through however many bounces it performs
 	for (uint Bounce = 0; Bounce < Reservoir.GetNumExtraBounces(); Bounce++)
 	{
-		float3 w_i = Bounces[Bounce].Direction;
-		float z_i = Bounces[Bounce].Distance;
+		float4 DecodedBounce = HVPT_DecodeBounce(Bounces[Bounce]);
+		float3 w_i = DecodedBounce.xyz;
+		float z_i = DecodedBounce.w;
 
 #if USE_SURFACE_CONTRIBUTIONS
 		// Should only ever be true on the last bounce

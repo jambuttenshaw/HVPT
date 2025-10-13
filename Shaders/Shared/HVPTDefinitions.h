@@ -77,8 +77,10 @@ struct FHVPT_Reservoir
 // (omega, z) tuples describing subsequent bounces after the first scattering event
 struct FHVPT_Bounce
 {
-	// TODO: Pack to float 3
-	float3 Direction;
+	// X - Direction encoded with octahedron mapping with 16 bits per component (X component in high bits, Y component in low bits)
+	// Y - Distance
+	// Encoding functions defined in ReSTIRUtils.ush
+	uint PackedDirection;
 	float Distance;
 };
 

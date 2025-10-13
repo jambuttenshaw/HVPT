@@ -142,7 +142,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 				ReprojectedPixelCoord = uint2(ScreenPosI);
 				ReprojectedReservoirIndex = HVPT_GetReservoirIndex(ReprojectedPixelCoord);
 
-				float TemporalFeatureTransmittance = TemporalFeatureTexture[ReprojectedPixelCoord];
+				float TemporalFeatureTransmittance = TemporalFeatureTexture[ReprojectedPixelCoord].r;
 				if (FeatureTransmittance == 1.0f && TemporalFeatureTransmittance != 1.0f)
 				{
 					return;

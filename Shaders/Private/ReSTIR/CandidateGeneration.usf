@@ -144,8 +144,7 @@ FHVPT_Reservoir ComputeInitialSample(
 		{
 			OutReservoir.SetDepth(PrimaryScatterDepth);
 			OutReservoir.SetNumExtraBounces(Bounce);
-			ExtraBounces[Bounce - 1].Direction = Ray.Direction;
-			ExtraBounces[Bounce - 1].Distance = TrackingResult.Distance;
+			HVPT_EncodeBounce(ExtraBounces[Bounce - 1], Ray.Direction, TrackingResult.Distance);
 #endif
 		}
 

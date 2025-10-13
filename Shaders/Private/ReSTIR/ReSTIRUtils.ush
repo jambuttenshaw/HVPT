@@ -3,6 +3,7 @@
 
 #include "../../Shared/HVPTDefinitions.h"
 
+#include "/Engine/Private/OctahedralCommon.ush"
 #include "../Utils/PathTracingUtils.ush"
 
 #ifndef MULTIPLE_BOUNCES
@@ -41,6 +42,25 @@ float3 HVPT_GetRayDirection(uint2 PixelCoord)
 	TranslatedWorldPosition.xyz /= TranslatedWorldPosition.w;
 
 	return GetCameraVectorFromTranslatedWorldPosition(TranslatedWorldPosition.xyz);
+}
+
+//
+// --- BOUNCE HELPERS ---
+//
+
+void HVPT_EncodeBounce(out FHVPT_Bounce Bounce, float3 Direction, float Distance)
+{
+	float2 OctahedronDirection = UnitVectorToOctahedron(Direction);
+	Bounce.PackedDirection = (f32tof16(OctahedronDirection.x) << 16) | f32tof16(OctahedronDirection.y);
+	Bounce.Distance = Distance;
+}
+
+float4 HVPT_DecodeBounce(FHVPT_Bounce Bounce)
+{
+	float4 Out;
+	Out.xyz = OctahedronToUnitVector(float2(f16tof32(Bounce.PackedDirection >> 16), f16tof32(Bounce.PackedDirection)));
+	Out.w = Bounce.Distance;
+	return Out;
 }
 
 //
