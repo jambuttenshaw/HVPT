@@ -26,6 +26,7 @@ Texture2D<float> SceneDepthTexture_Copy;
 uint TemporalSeed;
 
 uint NumInitialCandidates;
+uint bUseShadowTermForCandidateGeneration;
 
 RWStructuredBuffer<FHVPT_Reservoir> RWCurrentReservoirs;
 RWStructuredBuffer<FHVPT_Bounce> RWExtraBounces;
@@ -36,7 +37,7 @@ RWTexture2D<float3> RWDebugTexture;
 
 
 #if USE_SURFACE_CONTRIBUTIONS
-float3 SampleDirectLightingSurface_Unshadowed(
+float3 SampleDirectLightingSurface(
 	FRayDesc Ray, 
 	FPathTracingPayload Payload,
 	inout RandomSequence RandSequence, 
@@ -56,6 +57,10 @@ float3 SampleDirectLightingSurface_Unshadowed(
 
 	FMaterialEval MaterialEval = EvalMaterial(-Ray.Direction, LightSample.Direction, Payload, float2(1.0f, 0.0f));
 	float3 Ld = MaterialEval.Weight * LightSample.RadianceOverPdf;
+	if (bUseShadowTermForCandidateGeneration)
+	{
+		Ld *= HVPT_CalculateLightVisibility<false>(Payload.TranslatedWorldPos, LightSample, RandSequence);
+	}
 
 	OutLightPDF = LightSample.Pdf;
 	OutLightSample = LightRandValue.yz;
@@ -64,7 +69,7 @@ float3 SampleDirectLightingSurface_Unshadowed(
 #endif
 
 
-float3 SampleDirectLighting_Unshadowed(
+float3 SampleDirectLighting(
 	FRayDesc Ray,
 	FHVPT_TrackingResult TrackingResult,
 	float3 TranslatedWorldPos,
@@ -85,6 +90,10 @@ float3 SampleDirectLighting_Unshadowed(
 
 	float Phase = HenyeyGreensteinPhase(TrackingResult.PhaseG, dot(-Ray.Direction, LightSample.Direction));
 	float3 Ld = Phase * LightSample.RadianceOverPdf;
+	if (bUseShadowTermForCandidateGeneration)
+	{
+		Ld *= HVPT_CalculateLightVisibility<false>(TranslatedWorldPos, LightSample, RandSequence);
+	}
 
 	OutLightPDF = LightSample.Pdf;
 	OutLightSample = LightRandValue.yz;
@@ -157,7 +166,7 @@ FHVPT_Reservoir ComputeInitialSample(
 
 			float OutLightPDF = 0.0f;
 			uint LightId = -1;
-			float3 Ld = SampleDirectLighting_Unshadowed(
+			float3 Ld = SampleDirectLighting(
 				Ray, TrackingResult, TranslatedWorldPos, RandSequence, OutLightPDF, LightId, OutReservoir.LightSample
 			);
 			float3 Le = TrackingResult.Emission;
@@ -247,7 +256,7 @@ FHVPT_Reservoir ComputeInitialSample(
 
 				float OutLightPDF = 0.0f;
 				uint LightId = -1;
-				float3 Ld = SampleDirectLightingSurface_Unshadowed(
+				float3 Ld = SampleDirectLightingSurface(
 					Ray, Payload, RandSequence, OutLightPDF, LightId, OutReservoir.LightSample
 				);
 				float3 Le = Payload.Radiance;

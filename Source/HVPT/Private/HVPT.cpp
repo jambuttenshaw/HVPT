@@ -90,6 +90,13 @@ static TAutoConsoleVariable<int32> CVarHVPTReSTIRInitialCandidates(
 	ECVF_RenderThreadSafe
 );
 
+static TAutoConsoleVariable<bool> CVarHVPTReSTIRShadowTermForCandidateGeneration(
+	TEXT("r.HVPT.ReSTIR.ShadowTermForCandidateGeneration"),
+	false,
+	TEXT("Include shadow term for generating candidate samples (Default = false)."),
+	ECVF_RenderThreadSafe
+);
+
 static TAutoConsoleVariable<bool> CVarHVPTReSTIRTemporalReuse(
 	TEXT("r.HVPT.ReSTIR.TemporalReuse"),
 	true,
@@ -403,6 +410,11 @@ namespace HVPT
 	int32 GetNumInitialCandidates()
 	{
 		return FMath::Max(CVarHVPTReSTIRInitialCandidates.GetValueOnRenderThread(), 1);
+	}
+
+	bool GetUseShadowTermForCandidateGeneration()
+	{
+		return CVarHVPTReSTIRShadowTermForCandidateGeneration.GetValueOnRenderThread();
 	}
 
 	int32 GetNumSpatialReuseSamples()

@@ -103,6 +103,7 @@ public:
 		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, SceneDepthTexture_Copy)
 
 		SHADER_PARAMETER(uint32, NumInitialCandidates)
+		SHADER_PARAMETER(uint32, bUseShadowTermForCandidateGeneration)
 
 		// Output
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Reservoir>, RWCurrentReservoirs)
@@ -419,6 +420,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 		PassParameters->SceneDepthTexture_Copy = GraphBuilder.CreateSRV(State.DepthBufferCopy);
 
 		PassParameters->NumInitialCandidates = HVPT::GetNumInitialCandidates();
+		PassParameters->bUseShadowTermForCandidateGeneration = HVPT::GetUseShadowTermForCandidateGeneration();
 
 		PassParameters->RWCurrentReservoirs = GraphBuilder.CreateUAV(ReservoirsA);
 		PassParameters->RWExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesA);

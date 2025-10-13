@@ -43,6 +43,7 @@ namespace HVPT
 	// ReSTIR Pipeline
 	HVPT_API bool UseReSTIR();
 	HVPT_API int32 GetNumInitialCandidates();
+	HVPT_API bool GetUseShadowTermForCandidateGeneration();
 	HVPT_API bool GetTemporalReuseEnabled();
 	HVPT_API bool GetTemporalReuseMISEnabled();
 	HVPT_API float GetTemporalReuseHistoryThreshold();
