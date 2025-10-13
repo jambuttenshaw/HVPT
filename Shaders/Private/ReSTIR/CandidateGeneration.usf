@@ -267,17 +267,9 @@ FHVPT_Reservoir ComputeInitialSample(
 				float EmissionRatio = EmissionWeight / (EmissionWeight + Luminance(Albedo * Ld));
 				if (isnan(EmissionRatio))
 					EmissionRatio = 0.0f;
-
-				if (RandomSequence_GenerateSample1D(RandSequence) < EmissionRatio)
-				{
-					PathPDF *= EmissionRatio;
-					OutReservoir.SetEmissionPath(true);
-				}
-				else
-				{
-					PathPDF *= OutLightPDF * (1.0f - EmissionRatio);
-					OutReservoir.SetLightId(LightId);
-				}
+					
+				bool bEmissionPath = RandomSequence_GenerateSample1D(RandSequence) < EmissionRatio;
+				PathPDF *= bEmissionPath ? EmissionRatio : OutLightPDF * (1.0f - EmissionRatio);
 
 				// Calculate target function for this sample
 				// If PDF is 0 then no problem - OutReservoir.RunningSum will be 0 and this reservoir will not be chosen
@@ -285,28 +277,21 @@ FHVPT_Reservoir ComputeInitialSample(
 				{
 					OutReservoir.P_y = PathPHat * Luminance(OutReservoir.GetEmissionPath() ? Le : Ld * OutLightPDF);
 					OutReservoir.RunningSum = OutReservoir.P_y / PathPDF;
+					OutReservoir.SetEmissionPath(bEmissionPath);
+					OutReservoir.SetLightId(LightId);
 				}
 			}
-			else
-			{
-				// Didn't hit surface
-				OutReservoir.RunningSum = 0.0f;
-				OutReservoir.P_y = 0.0f;
-			}
 
-			// Regardless of surface hit or not, we do not want to perform subsequent bounces off of surfaces
+			// Whether surface hit was encountered or not, we do not want to bounce the ray off of a surface
 			bHitEmpty = true;
 		}
 #endif
+#if MULTIPLE_BOUNCES
 		else
 		{
-			// Didn't hit volume
-			OutReservoir.RunningSum = 0.0f;
-			OutReservoir.P_y = 0.0f;
-#if MULTIPLE_BOUNCES
 			bHitEmpty = true;
-#endif
 		}
+#endif
 
 #if MULTIPLE_BOUNCES
 		HVPT_SimpleResampleStep<false>(OutReservoir, CombinedReservoir, RandomSequence_GenerateSample1D(RandSequence));
