@@ -15,60 +15,60 @@ struct FHVPT_Reservoir
 	float M;			// The effective sample account of this reservoir - the number of candidate samples processed
 	float P_y;			// The target function evaluation for the sample in this reservoir
 
-	// PackedData[0]:
+	// PackedData.x:
 	//		Top 28 bits: SampledPixel (linear index into reservoir buffer) (23 bits are required for 3840x2160 frame)
 	//		Next 3 bits: NumExtraBounces (supports up to 8 bounces in total)
 	//		Final bit:   bEmissionPath
-	// PackedData[1]:
+	// PackedData.y:
 	//		Top 16 bits: LightId (supporting up to 65536 lights)
 	//		Bottom 16 bits: Depth as 16-bit float
-	uint PackedData[2];
+	uint2 PackedData;
 	float2 LightSample;
 
 #ifndef __cplusplus
 	void SetEmissionPath(bool bEmissionPath)
 	{
-		PackedData[0] = (PackedData[0] & 0xFFFFFFE) | (bEmissionPath & 0x00000001);
+		PackedData.x = (PackedData.x & 0xFFFFFFE) | (bEmissionPath & 0x00000001);
 	}
 	bool GetEmissionPath()
 	{
-		return (PackedData[0] & 0x00000001);
+		return (PackedData.x & 0x00000001);
 	}
 
 	void SetNumExtraBounces(uint NumExtraBounces)
 	{
-		PackedData[0] = (PackedData[0] & 0xFFFFFF1) | ((NumExtraBounces << 1) & 0x0000000E);
+		PackedData.x = (PackedData.x & 0xFFFFFF1) | ((NumExtraBounces << 1) & 0x0000000E);
 	}
 	uint GetNumExtraBounces()
 	{
-		return (PackedData[0] & 0x0000000E) >> 1;
+		return (PackedData.x & 0x0000000E) >> 1;
 	}
 
 	void SetSampledPixel(uint SampledPixel)
 	{
-		PackedData[0] = (PackedData[0] & 0x0000000F) | (SampledPixel << 4);
+		PackedData.x = (PackedData.x & 0x0000000F) | (SampledPixel << 4);
 	}
 	uint GetSampledPixel()
 	{
-		return PackedData[0] >> 4;
+		return PackedData.x >> 4;
 	}
 
 	void SetDepth(float Depth)
 	{
-		PackedData[1] = (PackedData[1] & 0xFFFF0000) | f32tof16(Depth);
+		PackedData.y = (PackedData.y & 0xFFFF0000) | f32tof16(Depth);
 	}
 	float GetDepth()
 	{
-		return f16tof32(PackedData[1]);
+		return f16tof32(PackedData.y);
 	}
 
 	void SetLightId(uint LightId)
 	{
-		PackedData[1] = (PackedData[1] & 0x0000FFFF) | (LightId << 16);
+		PackedData.y = (PackedData.y & 0x0000FFFF) | (LightId << 16);
 	}
 	uint GetLightId()
 	{
-		return PackedData[1] >> 16;
+		return PackedData.y >> 16;
 	}
 #endif
 };
@@ -80,8 +80,7 @@ struct FHVPT_Bounce
 	// X - Direction encoded with octahedron mapping with 16 bits per component (X component in high bits, Y component in low bits)
 	// Y - Distance
 	// Encoding functions defined in ReSTIRUtils.ush
-	uint PackedDirection;
-	float Distance;
+	uint2 PackedData;
 };
 
 
