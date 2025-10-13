@@ -43,9 +43,9 @@ RWTexture2D<float3> RWDebugTexture;
 #if MULTIPLE_BOUNCES
 
 template<bool bCurrentFrame>
-void LoadExtraBounces(uint2 PixelCoord, uint NumBounces, inout FHVPT_Bounce OutBounces[MAX_EXTRA_BOUNCES])
+void LoadExtraBounces(uint ReservoirIndex, uint NumBounces, inout FHVPT_Bounce OutBounces[MAX_EXTRA_BOUNCES])
 {
-	uint Idx = HVPT_GetExtraBounceIndex(PixelCoord);
+	uint Idx = HVPT_GetExtraBounceIndex(ReservoirIndex);
 	for (uint Bounce = 0; Bounce < NumBounces; Bounce++)
 	{
 		if (bCurrentFrame)
@@ -59,9 +59,9 @@ void LoadExtraBounces(uint2 PixelCoord, uint NumBounces, inout FHVPT_Bounce OutB
 	}
 }
 
-void WriteExtraBounces(uint2 PixelCoord, uint NumBounces, FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES])
+void WriteExtraBounces(uint ReservoirIndex, uint NumBounces, FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES])
 {
-	uint Idx = HVPT_GetExtraBounceIndex(PixelCoord);
+	uint Idx = HVPT_GetExtraBounceIndex(ReservoirIndex);
 	for (uint Bounce = 0; Bounce < NumBounces; Bounce++)
 	{
 		RWCurrentExtraBounces[Idx + Bounce] = Bounces[Bounce];
@@ -86,16 +86,16 @@ float3 ComputePreviousFrameRayDirection(uint2 Pixel)
 RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 {
 	uint2 PixelCoord = DispatchRaysIndex().xy;
-	uint LinearPixelIndex = HVPT_GetReservoirIndex(PixelCoord);
+	uint ReservoirIndex = HVPT_GetReservoirIndex(PixelCoord);
 
 	RandomSequence RandSequence = (RandomSequence)0;
-	RandomSequence_Initialize(RandSequence, LinearPixelIndex, TemporalSeed);
+	RandomSequence_Initialize(RandSequence, ReservoirIndex, TemporalSeed);
 
 	FRayDesc CanonicalRay = HVPT_CreateRayDesc(PixelCoord);
 
 	uint NumUsedReservoirs = 1;
 	FHVPT_Reservoir Taps[2];
-	Taps[0] = RWCurrentReservoirs[LinearPixelIndex];
+	Taps[0] = RWCurrentReservoirs[ReservoirIndex];
 
 	FHVPT_Reservoir OutReservoir = HVPT_CreateNewReservoir();
 #if MULTIPLE_BOUNCES
@@ -104,13 +104,14 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 
 	// TODO: Rename to ReprojectedPixelCoord
 	uint2 ReprojectedPixelCoord = PixelCoord;
+	uint ReprojectedReservoirIndex = ReservoirIndex;
 
 	float FeatureTransmittance = FeatureTexture[PixelCoord].r;
 
 	// Reprojection
 	if (bEnableTemporalReprojection)
 	{
-		float ReprojectionDepth = Taps[0].Depth;
+		float ReprojectionDepth = Taps[0].GetDepth();
 		if (ReprojectionDepth == POSITIVE_INFINITY)
 		{
 			// Velocity resampling
@@ -139,12 +140,13 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 			if (all(ScreenPosI >= 0) && all(ScreenPosI < View.ViewSizeAndInvSize.xy))
 			{
 				ReprojectedPixelCoord = uint2(ScreenPosI);
-			}
+				ReprojectedReservoirIndex = HVPT_GetReservoirIndex(ReprojectedPixelCoord);
 
-			float TemporalFeatureTransmittance = TemporalFeatureTexture[ReprojectedPixelCoord];
-			if (FeatureTransmittance == 1.0f && TemporalFeatureTransmittance != 1.0f)
-			{
-				return;
+				float TemporalFeatureTransmittance = TemporalFeatureTexture[ReprojectedPixelCoord];
+				if (FeatureTransmittance == 1.0f && TemporalFeatureTransmittance != 1.0f)
+				{
+					return;
+				}
 			}
 		}
 	}
@@ -165,13 +167,13 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 
 	if (NumUsedReservoirs == 2)
 	{
-		NonCanonicalSampleDepthInPrevFrame = Taps[1].Depth;
-		if (Taps[1].Depth != POSITIVE_INFINITY)
+		NonCanonicalSampleDepthInPrevFrame = Taps[1].GetDepth();
+		if (NonCanonicalSampleDepthInPrevFrame != POSITIVE_INFINITY)
 		{
 			float3 Direction = ComputePreviousFrameRayDirection(ReprojectedPixelCoord);
 			
-			float3 WorldPos = View.PrevTranslatedWorldCameraOrigin + Taps[1].Depth * Direction;
-			Taps[1].Depth = length(WorldPos - CanonicalRay.Origin);
+			float3 WorldPos = View.PrevTranslatedWorldCameraOrigin + NonCanonicalSampleDepthInPrevFrame * Direction;
+			Taps[1].SetDepth(length(WorldPos - CanonicalRay.Origin));
 		}
 
 		Neighbour_P_y = Taps[1].P_y;
@@ -179,7 +181,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 
 	// CanonicalSampleDepthInPrevFrame: Take the depth of the canonical sample from this frame.
 	// What is the distance from the PREVIOUS view origin to the sample point of this frame
-	float CanonicalSampleDepthInPrevFrame = Taps[0].Depth;
+	float CanonicalSampleDepthInPrevFrame = Taps[0].GetDepth();
 	if (CanonicalSampleDepthInPrevFrame != POSITIVE_INFINITY)
 	{
 		float3 WorldPos = CanonicalRay.Origin + CanonicalRay.Direction * CanonicalSampleDepthInPrevFrame;
@@ -202,7 +204,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 			{
 				// Resample temporal sample in the canonical (this frame's) domain
 #if MULTIPLE_BOUNCES
-				LoadExtraBounces<false>(PixelCoord, Taps[i].NumExtraBounces, Bounces);
+				LoadExtraBounces<false>(ReprojectedReservoirIndex, Taps[i].GetNumExtraBounces(), Bounces);
 #endif
 				HVPT_ResampleNeighbour(Taps[i], 
 #if MULTIPLE_BOUNCES
@@ -255,17 +257,17 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 					float UsedDepth = (i == 0) // Note: j is always 1 in this branch
 									? CanonicalSampleDepthInPrevFrame		// Canonical sample in temporal domain
 									: NonCanonicalSampleDepthInPrevFrame;	// Temporal sample in canonical domain
-					float BackupDepth = Taps[i].Depth;
-					Taps[i].Depth = UsedDepth;
+					float BackupDepth = Taps[i].GetDepth();
+					Taps[i].SetDepth(UsedDepth);
 
 #if MULTIPLE_BOUNCES
 					if (i == 0)
 					{
-						LoadExtraBounces<true>(PixelCoord, Taps[i].NumExtraBounces, Bounces);
+						LoadExtraBounces<true>(ReservoirIndex, Taps[i].GetNumExtraBounces(), Bounces);
 					}
 					else
 					{
-						LoadExtraBounces<false>(ReprojectedPixelCoord, Taps[i].NumExtraBounces, Bounces);
+						LoadExtraBounces<false>(ReprojectedReservoirIndex, Taps[i].GetNumExtraBounces(), Bounces);
 					}
 #endif
 
@@ -276,7 +278,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 						ReprojectedRay,
 						RandSequence));
 
-					Taps[i].Depth = BackupDepth;
+					Taps[i].SetDepth(BackupDepth);
 					if (isinf(P_y) || isnan(P_y))
 					{
 						P_y = 0.0f;
@@ -289,8 +291,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 		}
 #endif
 
-		Taps[i].RunningSum *=
-MISWeight;
+		Taps[i].RunningSum *= MISWeight;
 
 		if (HVPT_SimpleResampleStep<true>(Taps[i], OutReservoir, RandomSequence_GenerateSample1D(RandSequence), MaxPrevM))
 		{
@@ -299,16 +300,16 @@ MISWeight;
 		}
 	}
 
-	uint2 ExtraBouncePixelIndex = OutReservoir.SampledPixel;
-	OutReservoir.SampledPixel = PixelCoord;
+	uint ExtraBouncePixelIndex = OutReservoir.GetSampledPixel();
+	OutReservoir.SetSampledPixel(ReservoirIndex);
 
-	RWCurrentReservoirs[LinearPixelIndex] = OutReservoir;
+	RWCurrentReservoirs[ReservoirIndex] = OutReservoir;
 
 #if MULTIPLE_BOUNCES
 	if (HasSelection && SelectedId > 0)
 	{
-		LoadExtraBounces<false>(ExtraBouncePixelIndex, OutReservoir.NumExtraBounces, Bounces);
-		WriteExtraBounces(ExtraBouncePixelIndex, OutReservoir.NumExtraBounces, Bounces);
+		LoadExtraBounces<false>(ExtraBouncePixelIndex, OutReservoir.GetNumExtraBounces(), Bounces);
+		WriteExtraBounces(ExtraBouncePixelIndex, OutReservoir.GetNumExtraBounces(), Bounces);
 	}
 #endif
 

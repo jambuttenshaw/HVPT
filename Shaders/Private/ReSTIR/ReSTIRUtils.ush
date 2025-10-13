@@ -29,6 +29,11 @@ uint HVPT_GetExtraBounceIndex(uint2 PixelCoord, uint Bounce = 0)
 	return (HVPT_GetReservoirIndex(PixelCoord) * (NumBounces - 1)) + Bounce;
 }
 
+uint HVPT_GetExtraBounceIndex(uint ReservoirIndex, uint Bounce = 0)
+{
+	return (ReservoirIndex * (NumBounces - 1)) + Bounce;
+}
+
 float3 HVPT_GetRayDirection(uint2 PixelCoord)
 {
 	float2 ScreenPos = float2(PixelCoord) + HVPT_GetSubpixelJitter();
@@ -48,12 +53,10 @@ FHVPT_Reservoir HVPT_CreateNewReservoir()
 	OutReservoir.RunningSum = 0.0f;
 	OutReservoir.M = 0.0f;
 	OutReservoir.P_y = 0.0f;
-	OutReservoir.bEmissionPath = false;
-	OutReservoir.Depth = POSITIVE_INFINITY;
-	OutReservoir.LightId = -1;
+	OutReservoir.PackedData[0] = 0;
+	OutReservoir.SetDepth(POSITIVE_INFINITY);
+	OutReservoir.SetLightId(-1);
 	OutReservoir.LightSample = 0.0f;
-	OutReservoir.NumExtraBounces = 0;
-	OutReservoir.SampledPixel = 0;
 	return OutReservoir;
 }
 
@@ -81,13 +84,10 @@ bool HVPT_SimpleResampleStep(FHVPT_Reservoir Reservoir, inout FHVPT_Reservoir St
 	bool bSelectSample = RandValue * State.RunningSum < SampleWeight;
 
     // If we did select this sample, update the relevant data
-	State.P_y			  = bSelectSample ? Reservoir.P_y			  : State.P_y;
-	State.bEmissionPath   =	bSelectSample ? Reservoir.bEmissionPath	  : State.bEmissionPath;
-	State.Depth			  =	bSelectSample ? Reservoir.Depth			  : State.Depth;
-	State.LightId		  =	bSelectSample ? Reservoir.LightId		  : State.LightId;
-	State.LightSample	  =	bSelectSample ? Reservoir.LightSample	  : State.LightSample;
-	State.NumExtraBounces = bSelectSample ? Reservoir.NumExtraBounces : State.NumExtraBounces;
-	State.SampledPixel	  =	bSelectSample ? Reservoir.SampledPixel	  : State.SampledPixel;
+	State.P_y			= bSelectSample ? Reservoir.P_y			  : State.P_y;
+	State.PackedData[0] = bSelectSample ? Reservoir.PackedData[0] : State.PackedData[0];
+	State.PackedData[1] = bSelectSample ? Reservoir.PackedData[1] : State.PackedData[1];
+	State.LightSample	= bSelectSample ? Reservoir.LightSample	  : State.LightSample;
 
     return bSelectSample;
 }

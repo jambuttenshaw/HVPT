@@ -134,7 +134,7 @@ float3 HVPT_EvaluateF(
 	float3 F = 1.0f;
 
 	// Set TMax according to hit point of reservoir
-	Ray.TMax = Reservoir.Depth;
+	Ray.TMax = Reservoir.GetDepth();
 
 	// Sample volume properties at scattering event
 	float3 TranslatedWorldPos = Ray.Origin + Ray.TMax * Ray.Direction;
@@ -155,7 +155,7 @@ float3 HVPT_EvaluateF(
 #endif
 
 	// Follow path through however many bounces it performs
-	for (uint Bounce = 0; Bounce < Reservoir.NumExtraBounces; Bounce++)
+	for (uint Bounce = 0; Bounce < Reservoir.GetNumExtraBounces(); Bounce++)
 	{
 		float3 w_i = Bounces[Bounce].Direction;
 		float z_i = Bounces[Bounce].Distance;
@@ -201,7 +201,7 @@ float3 HVPT_EvaluateF(
 			false
 		);
 
-		if (Reservoir.bEmissionPath)
+		if (Reservoir.GetEmissionPath())
 		{
 			// TODO: Do I need to include geometry term G = 1 / (z * z)?
 			F *= MaterialPayload.Radiance;
@@ -212,7 +212,7 @@ float3 HVPT_EvaluateF(
 			FPathTracingPayload Payload = HVPT_CreateSurfaceHitPayload(MaterialPayload);
 			
 			// Pick a light source to sample
-			FLightSample LightSample = SampleLight(Reservoir.LightId, Reservoir.LightSample, Payload.TranslatedWorldPos, Payload.WorldNormal);
+			FLightSample LightSample = SampleLight(Reservoir.GetLightId(), Reservoir.LightSample, Payload.TranslatedWorldPos, Payload.WorldNormal);
 			float3 LightRadiance = LightSample.RadianceOverPdf * LightSample.Pdf;
 
 			// Eval material
@@ -232,7 +232,7 @@ float3 HVPT_EvaluateF(
 	{
 
 		// Calculate illumination from light
-		if (Reservoir.bEmissionPath)
+		if (Reservoir.GetEmissionPath())
 		{
 			float3 SigmaA = (Properties.SigmaT - Properties.SigmaSHG);
 			F *= /*SigmaA * */Properties.Emission;
@@ -241,7 +241,7 @@ float3 HVPT_EvaluateF(
 		{
 			// It is scattering path
 			// Calculate light from light source and then calculate transmittance to that light source
-			FLightSample LightSample = SampleLight(Reservoir.LightId, Reservoir.LightSample, TranslatedWorldPos, 0);
+			FLightSample LightSample = SampleLight(Reservoir.GetLightId(), Reservoir.LightSample, TranslatedWorldPos, 0);
 			float3 LightRadiance = LightSample.RadianceOverPdf * LightSample.Pdf;
 
 			float Phase = HenyeyGreensteinPhase(Properties.PhaseG, dot(-Ray.Direction, LightSample.Direction));

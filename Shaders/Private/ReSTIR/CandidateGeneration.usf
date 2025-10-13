@@ -136,14 +136,14 @@ FHVPT_Reservoir ComputeInitialSample(
 		// Add vertex to path
 		if (Bounce == 0)
 		{
-			OutReservoir.Depth = TrackingResult.Distance; // If tracking did not intersect volume then distance will be POSITIVE_INFINITY anyway
+			OutReservoir.SetDepth(TrackingResult.Distance); // If tracking did not intersect volume then distance will be POSITIVE_INFINITY anyway
 #if MULTIPLE_BOUNCES
-			PrimaryScatterDepth = OutReservoir.Depth;
+			PrimaryScatterDepth = TrackingResult.Distance;
 		}
 		else
 		{
-			OutReservoir.Depth = PrimaryScatterDepth;
-			OutReservoir.NumExtraBounces = Bounce;
+			OutReservoir.SetDepth(PrimaryScatterDepth);
+			OutReservoir.SetNumExtraBounces(Bounce);
 			ExtraBounces[Bounce - 1].Direction = Ray.Direction;
 			ExtraBounces[Bounce - 1].Distance = TrackingResult.Distance;
 #endif
@@ -166,8 +166,9 @@ FHVPT_Reservoir ComputeInitialSample(
 			float3 OneMinusAlbedo = 1.0f - Albedo;
 
 			float OutLightPDF = 0.0f;
+			uint LightId = -1;
 			float3 Ld = SampleDirectLighting(
-				Ray, TrackingResult, TranslatedWorldPos, true, RandSequence, OutLightPDF, OutReservoir.LightId, OutReservoir.LightSample
+				Ray, TrackingResult, TranslatedWorldPos, true, RandSequence, OutLightPDF, LightId, OutReservoir.LightSample
 			);
 			float3 Le = TrackingResult.Emission;
 
@@ -181,19 +182,20 @@ FHVPT_Reservoir ComputeInitialSample(
 			{
 				// Emission was selected
 				CandidatePDF *= EmissionRatio;
-				OutReservoir.bEmissionPath = true;
+				OutReservoir.SetEmissionPath(true);
 			}
 			else
 			{
 				// Scattering was selected
 				CandidatePDF *= OutLightPDF * (1.0f - EmissionRatio);
+				OutReservoir.SetLightId(LightId);
 			}
 
 			// Calculate target function for this sample
 			// If PDF is 0 then no problem - OutReservoir.RunningSum will be 0 and this reservoir will not be chosen
 			if (CandidatePDF > 0.0f)
 			{
-				if (OutReservoir.bEmissionPath)
+				if (OutReservoir.GetEmissionPath())
 				{
 					float3 SigmaA = TrackingResult.SigmaT - TrackingResult.SigmaS;
 					OutReservoir.P_y = PathPHat * Luminance(SigmaA * Le);
@@ -254,8 +256,9 @@ FHVPT_Reservoir ComputeInitialSample(
 				float3 OneMinusAlbedo = 1.0f - Albedo;
 
 				float OutLightPDF = 0.0f;
+				uint LightId = -1;
 				float3 Ld = SampleDirectLightingSurface(
-					Ray, Payload, true, RandSequence, OutLightPDF, OutReservoir.LightId, OutReservoir.LightSample
+					Ray, Payload, true, RandSequence, OutLightPDF, LightId, OutReservoir.LightSample
 				);
 				float3 Le = Payload.Radiance;
 
@@ -268,18 +271,19 @@ FHVPT_Reservoir ComputeInitialSample(
 				if (RandomSequence_GenerateSample1D(RandSequence) < EmissionRatio)
 				{
 					PathPDF *= EmissionRatio;
-					OutReservoir.bEmissionPath = true;
+					OutReservoir.SetEmissionPath(true);
 				}
 				else
 				{
 					PathPDF *= OutLightPDF * (1.0f - EmissionRatio);
+					OutReservoir.SetLightId(LightId);
 				}
 
 				// Calculate target function for this sample
 				// If PDF is 0 then no problem - OutReservoir.RunningSum will be 0 and this reservoir will not be chosen
 				if (PathPDF > 0.0f)
 				{
-					OutReservoir.P_y = PathPHat * Luminance(OutReservoir.bEmissionPath ? Le : Ld * OutLightPDF);
+					OutReservoir.P_y = PathPHat * Luminance(OutReservoir.GetEmissionPath() ? Le : Ld * OutLightPDF);
 					OutReservoir.RunningSum = OutReservoir.P_y / PathPDF;
 				}
 			}
@@ -368,7 +372,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 		if (bSelected)
 		{
 #if MULTIPLE_BOUNCES
-			for (uint Bounce = 0; Bounce < FinalReservoir.NumExtraBounces; Bounce++)
+			for (uint Bounce = 0; Bounce < FinalReservoir.GetNumExtraBounces(); Bounce++)
 			{
 				FinalExtraBounces[Bounce] = OutBounces[Bounce];
 			}
@@ -377,8 +381,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 	} // For each initial candidate
 
 	// Store the sampled pixel in the reservoir, this is used to later retrieve its extra bounces
-	// TODO: Can be converted to a 1D index into extra bounce index?
-	FinalReservoir.SampledPixel = PixelCoord;
+	FinalReservoir.SetSampledPixel(HVPT_GetReservoirIndex(PixelCoord));
 
 	// Evaluate PHat
 	if (FinalReservoir.RunningSum > 0.0f)
@@ -398,7 +401,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 #if MULTIPLE_BOUNCES
 	// Output bounces
 	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(PixelCoord, 0);
-	for (uint i = 0; i < FinalReservoir.NumExtraBounces; i++)
+	for (uint i = 0; i < FinalReservoir.GetNumExtraBounces(); i++)
 	{
 		RWExtraBounces[ExtraBounceIndex + i] = FinalExtraBounces[i];
 	}

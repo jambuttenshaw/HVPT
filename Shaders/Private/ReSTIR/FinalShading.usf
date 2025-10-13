@@ -45,7 +45,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRFinalShadingRGS)
 #if MULTIPLE_BOUNCES
 		FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES];
 		uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(PixelCoord, 0);
-		for (uint i = 0; i < Reservoir.NumExtraBounces; i++)
+		for (uint i = 0; i < Reservoir.GetNumExtraBounces(); i++)
 		{
 			Bounces[i] = ExtraBounces[ExtraBounceIndex + i];
 		}

@@ -11,21 +11,66 @@ namespace UE::HLSL
 
 struct FHVPT_Reservoir
 {
-	// TODO: Data packing
-	// TODO: Pack pixel index and num extra bounces together (into one int? would give max resolution of 16k x 16k and 15 max bounces)
-	// TODO: Also infer bEmissionPath from LightId. LightId doens't need 32 bits of precision, could it be packed with another field?
-
 	float RunningSum;	// The sum of all weights of all samples processed by this reservoir
 	float M;			// The effective sample account of this reservoir - the number of candidate samples processed
 	float P_y;			// The target function evaluation for the sample in this reservoir
 
-	// Data to recover the path stored in the reservoir
-	bool bEmissionPath;   // Whether this path is a scattering or emission path
-	uint NumExtraBounces; // The number of bounces stored in the extra bounces buffer
-	uint2 SampledPixel;	  // The pixel that this reservoir samples in (useful for retrieving where to read/write extra bounces from/to)
-	float Depth;		  // Distance along ray that first scattering event occurs
-	int LightId;		  // If scattering path, the light source that the path should sample
-	float2 LightSample;   // RNG for the light sample to re-eval the same point on the light
+	// PackedData[0]:
+	//		Top 28 bits: SampledPixel (linear index into reservoir buffer) (23 bits are required for 3840x2160 frame)
+	//		Next 3 bits: NumExtraBounces (supports up to 8 bounces in total)
+	//		Final bit:   bEmissionPath
+	// PackedData[1]:
+	//		Top 16 bits: LightId (supporting up to 65536 lights)
+	//		Bottom 16 bits: Depth as 16-bit float
+	uint PackedData[2];
+	float2 LightSample;
+
+#ifndef __cplusplus
+	void SetEmissionPath(bool bEmissionPath)
+	{
+		PackedData[0] = (PackedData[0] & 0xFFFFFFE) | (bEmissionPath & 0x00000001);
+	}
+	bool GetEmissionPath()
+	{
+		return (PackedData[0] & 0x00000001);
+	}
+
+	void SetNumExtraBounces(uint NumExtraBounces)
+	{
+		PackedData[0] = (PackedData[0] & 0xFFFFFF1) | ((NumExtraBounces << 1) & 0x0000000E);
+	}
+	uint GetNumExtraBounces()
+	{
+		return (PackedData[0] & 0x0000000E) >> 1;
+	}
+
+	void SetSampledPixel(uint SampledPixel)
+	{
+		PackedData[0] = (PackedData[0] & 0x0000000F) | ((SampledPixel << 4) & 0xFFFFFFF0);
+	}
+	uint GetSampledPixel()
+	{
+		return (PackedData[0] & 0xFFFFFFF0) >> 4;
+	}
+
+	void SetDepth(float Depth)
+	{
+		PackedData[1] = (PackedData[1] & 0xFFFF0000) | (f32tof16(Depth) & 0x0000FFFF);
+	}
+	float GetDepth()
+	{
+		return f16tof32(PackedData[1] & 0x0000FFFF);
+	}
+
+	void SetLightId(uint LightId)
+	{
+		PackedData[1] = (PackedData[1] & 0x0000FFFF) | ((LightId << 16) & 0xFFFF0000);
+	}
+	uint GetLightId()
+	{
+		return (PackedData[1] & 0xFFFF0000) >> 16;
+	}
+#endif
 };
 
 

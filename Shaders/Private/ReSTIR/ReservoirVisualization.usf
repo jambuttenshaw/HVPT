@@ -47,13 +47,13 @@ void ReSTIRDebugVisualizationCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		switch (DebugViewMode)
 		{
 		case HVPT_DEBUG_VIEW_MODE_NUM_BOUNCES:
-			OutColor = NormalizedFloatAsHueToRGB(1.0f - (Reservoir.NumExtraBounces) / (float)(NumBounces));
+			OutColor = NormalizedFloatAsHueToRGB(1.0f - (Reservoir.GetNumExtraBounces()) / (float)(NumBounces));
 			break;
 		case HVPT_DEBUG_VIEW_MODE_PATH_TYPE:
-			OutColor = (Reservoir.bEmissionPath) ? float3(1, 1, 0) : float3(0, 1, 1);
+			OutColor = (Reservoir.GetEmissionPath()) ? float3(1, 1, 0) : float3(0, 1, 1);
 			break;
 		case HVPT_DEBUG_VIEW_MODE_LIGHT_ID:
-			OutColor = NormalizedFloatAsHueToRGB((Reservoir.LightId) / (float)(SceneLightCount));
+			OutColor = NormalizedFloatAsHueToRGB((Reservoir.GetLightId()) / (float)(SceneLightCount));
 			break;
 		case HVPT_DEBUG_VIEW_MODE_TEMPORAL_REUSE:
 			// Written in TemporalReuse.usf

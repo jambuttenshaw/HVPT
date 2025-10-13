@@ -54,18 +54,18 @@ int2 GenerateNeighbourhoodOffset(inout RandomSequence RandSequence)
 }
 
 #if MULTIPLE_BOUNCES
-void LoadExtraBounces(uint2 PixelCoord, uint NumExtraBounces, inout FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES])
+void LoadExtraBounces(uint ReservoirIndex, uint NumExtraBounces, inout FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES])
 {
-	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(PixelCoord, 0);
+	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(ReservoirIndex, 0);
 	for (uint Bounce = 0; Bounce < NumExtraBounces; Bounce++)
 	{
 		Bounces[Bounce] = InExtraBounces[ExtraBounceIndex + Bounce];
 	}
 }
 
-void WriteExtraBounces(uint2 PixelCoord, uint NumExtraBounces, FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES])
+void WriteExtraBounces(uint ReservoirIndex, uint NumExtraBounces, FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES])
 {
-	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(PixelCoord, 0);
+	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(ReservoirIndex, 0);
 	for (uint Bounce = 0; Bounce < NumExtraBounces; Bounce++)
 	{
 		RWOutExtraBounces[ExtraBounceIndex + Bounce] = Bounces[Bounce];
@@ -85,21 +85,21 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 #endif
 
 	// Load current reservoir
-	uint LinearPixelIndex = HVPT_GetReservoirIndex(PixelCoord);
+	uint ReservoirIndex = HVPT_GetReservoirIndex(PixelCoord);
 
 	RandomSequence RandSequence = (RandomSequence)0;
-	RandomSequence_Initialize(RandSequence, LinearPixelIndex, TemporalSeed);
+	RandomSequence_Initialize(RandSequence, ReservoirIndex, TemporalSeed);
 
 	FRayDesc CanonicalRay = HVPT_CreateRayDesc(PixelCoord);
 
 	// Check if pixel should have any volume radiance at all
 	if (FeatureTexture[PixelCoord].r == 1.0f)
 	{
-		OutReservoir = InReservoirs[LinearPixelIndex];
-		RWOutReservoirs[LinearPixelIndex] = OutReservoir;
+		OutReservoir = InReservoirs[ReservoirIndex];
+		RWOutReservoirs[ReservoirIndex] = OutReservoir;
 #if MULTIPLE_BOUNCES
-		LoadExtraBounces(PixelCoord, OutReservoir.NumExtraBounces, Bounces);
-		WriteExtraBounces(PixelCoord, OutReservoir.NumExtraBounces, Bounces);
+		LoadExtraBounces(ReservoirIndex, OutReservoir.GetNumExtraBounces(), Bounces);
+		WriteExtraBounces(ReservoirIndex, OutReservoir.GetNumExtraBounces(), Bounces);
 #endif
 		return;
 	}
@@ -128,7 +128,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 			if (i > 0) // Don't resample canonical - its already in this domain
 			{
 #if MULTIPLE_BOUNCES
-				LoadExtraBounces(Tap.SampledPixel, Tap.NumExtraBounces, Bounces);
+				LoadExtraBounces(Tap.GetSampledPixel(), Tap.GetNumExtraBounces(), Bounces);
 #endif
 				HVPT_ResampleNeighbour(Tap, 
 #if MULTIPLE_BOUNCES
@@ -174,7 +174,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 						);
 
 #if MULTIPLE_BOUNCES
-						if (i == 0) LoadExtraBounces(Tap.SampledPixel, Tap.NumExtraBounces, Bounces);
+						if (i == 0) LoadExtraBounces(Tap.GetSampledPixel(), Tap.GetNumExtraBounces(), Bounces);
 #endif
 
 						float P_y = Luminance(HVPT_EvaluateF<false>(Tap,
@@ -200,15 +200,15 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 		}
 	}
 
-	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(OutReservoir.SampledPixel);
-	OutReservoir.SampledPixel = PixelCoord;
-	RWOutReservoirs[LinearPixelIndex] = OutReservoir;
+	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(OutReservoir.GetSampledPixel());
+	OutReservoir.SetSampledPixel(ReservoirIndex);
+	RWOutReservoirs[ReservoirIndex] = OutReservoir;
 
 #if MULTIPLE_BOUNCES
 	if (OutReservoir.RunningSum > 0.0f)
 	{
 		uint OutExtraBounceIndex = HVPT_GetExtraBounceIndex(PixelCoord, 0);
-		for (uint Bounce = 0; Bounce < OutReservoir.NumExtraBounces; Bounce++)
+		for (uint Bounce = 0; Bounce < OutReservoir.GetNumExtraBounces(); Bounce++)
 		{
 			RWOutExtraBounces[OutExtraBounceIndex + Bounce] = InExtraBounces[ExtraBounceIndex + Bounce];
 		}
