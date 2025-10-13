@@ -376,7 +376,7 @@ void HVPT_AllocateBottomLevelGridCS(
 }
 
 StructuredBuffer<FHVPT_GridData> ExtinctionGridBuffer;
-RWStructuredBuffer<FHVPT_GridData> RWMajorantVoxelGridBuffer;
+RWStructuredBuffer<FHVPT_MajorantGridData> RWMajorantVoxelGridBuffer;
 
 [numthreads(THREADGROUP_SIZE_3D, THREADGROUP_SIZE_3D, THREADGROUP_SIZE_3D)]
 void HVPT_BuildMajorantVoxelGridCS(

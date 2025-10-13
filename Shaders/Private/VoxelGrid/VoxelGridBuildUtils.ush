@@ -9,60 +9,44 @@
 
 struct FMajorantData
 {
-	float Minorant;
 	float Majorant;
 };
 
 FMajorantData CreateMajorantData()
 {
 	FMajorantData MajorantData;
-	MajorantData.Minorant = 1.0e4;
 	MajorantData.Majorant = 0.0;
 	return MajorantData;
 }
 
 void UpdateMajorantData(inout FMajorantData MajorantData, float3 Value)
 {
-	float MinValue = min(Value.x, min(Value.y, Value.z));
 	float MaxValue = max(Value.x, max(Value.y, Value.z));
-	MajorantData.Minorant = min(MajorantData.Minorant, MinValue);
 	MajorantData.Majorant = max(MajorantData.Majorant, MaxValue);
-}
-
-FMajorantData CreateMajorantData(float3 MinValue, float3 MaxValue)
-{
-	FMajorantData MajorantData = CreateMajorantData();
-	UpdateMajorantData(MajorantData, MinValue);
-	UpdateMajorantData(MajorantData, MaxValue);
-	return MajorantData;
 }
 
 // Updating majorant data should occur for a single media
 void UpdateMajorantData(inout FMajorantData MajorantData, FMajorantData Value)
 {
-	MajorantData.Minorant = min(MajorantData.Minorant, Value.Minorant);
 	MajorantData.Majorant = max(MajorantData.Majorant, Value.Majorant);
 }
 
 // Merging majorant data should occur when mixing media
 void MergeMajorantData(inout FMajorantData MajorantData, FMajorantData OverlappingMajorant)
 {
-	MajorantData.Minorant += OverlappingMajorant.Minorant;
 	MajorantData.Majorant += OverlappingMajorant.Majorant;
 }
 
-FMajorantData GetMajorantData(FHVPT_GridData MajorantGridData)
+FMajorantData GetMajorantData(FHVPT_MajorantGridData MajorantGridData)
 {
 	FMajorantData Data;
-	Data.Minorant = asfloat(MajorantGridData.PackedData[0]);
-	Data.Majorant = asfloat(MajorantGridData.PackedData[1]);
+	Data.Majorant = asfloat(MajorantGridData.PackedData[0]);
 	return Data;
 }
 
-void SetMajorantData(inout FHVPT_GridData MajorantGridData, FMajorantData MajorantData)
+void SetMajorantData(inout FHVPT_MajorantGridData MajorantGridData, FMajorantData MajorantData)
 {
-	MajorantGridData.PackedData[0] = asuint(MajorantData.Minorant);
-	MajorantGridData.PackedData[1] = asuint(MajorantData.Majorant);
+	MajorantGridData.PackedData[0] = asuint(MajorantData.Majorant);
 }
 
 float3 GetExtinction(FHVPT_GridData ExtinctionGridData)

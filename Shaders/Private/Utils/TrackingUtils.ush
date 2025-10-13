@@ -81,8 +81,6 @@ struct FHVPT_MajorantSamplingContext
 			return Sample;
 		}
 
-		// TODO: For reasons I do not understand, in some cases this loop never terminates.
-		// TODO: DDA Terminates correctly in RayMarchingTransmittance, so the error must be with the condition guarding Iterator.Next()
 		int LoopGuard = 0;
 		const int MaxSteps = 512;
 		while (LoopGuard++ < MaxSteps)
@@ -93,7 +91,9 @@ struct FHVPT_MajorantSamplingContext
 				bool bIsNextSegment = Iterator.Next();
 				// Get new majorant
 				// Majorant should never be less than 0 (and only equal to 0 in areas of empty space)
-				SigmaMaj = max(GetMajorantData(HVPT_OrthoGrid.MajorantGridBuffer[HVPT_GetTopLevelLinearIndex(Iterator)]).Majorant, 0.0f);
+				uint Index = HVPT_GetTopLevelLinearIndex(Iterator);
+				FMajorantData MajorantData = GetMajorantData(HVPT_OrthoGrid.MajorantGridBuffer[Index]);
+				SigmaMaj = max(MajorantData.Majorant, 0.0f);
 
 				if (!bIsNextSegment)
 				{

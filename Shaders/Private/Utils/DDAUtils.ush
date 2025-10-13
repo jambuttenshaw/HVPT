@@ -116,7 +116,7 @@ struct FHVPT_GridIterator
 
 	float3 GetVoxelMidpoint()
 	{
-		return (GetVoxelEntry() + GetVoxelExit()) * 0.5f;
+		return RayMarchPos + DeltaT * Direction * 0.5f;
 	}
 
 	float GetWorldDeltaT()

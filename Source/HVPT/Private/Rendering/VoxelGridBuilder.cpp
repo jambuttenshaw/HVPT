@@ -559,7 +559,7 @@ class FHVPT_BuildMajorantVoxelGridCS : public FGlobalShader
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_GridData>, ExtinctionGridBuffer)
 
 		// Output
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_GridData>, RWMajorantVoxelGridBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_MajorantGridData>, RWMajorantVoxelGridBuffer)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -1486,7 +1486,7 @@ void HVPT::Private::BuildMajorantVoxelGrid(
 {
 	uint32 MajorantVoxelGridBufferSize = TopLevelGridResolution.X * TopLevelGridResolution.Y * TopLevelGridResolution.Z;
 	MajorantVoxelGridBuffer = GraphBuilder.CreateBuffer(
-		FRDGBufferDesc::CreateStructuredDesc(sizeof(FHVPT_GridData), MajorantVoxelGridBufferSize),
+		FRDGBufferDesc::CreateStructuredDesc(sizeof(FHVPT_MajorantGridData), MajorantVoxelGridBufferSize),
 		TEXT("HVPT.MajorantVoxelGridBuffer")
 	);
 

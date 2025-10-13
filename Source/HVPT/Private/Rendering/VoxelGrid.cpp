@@ -321,7 +321,7 @@ TRDGUniformBufferRef<FHVPTOrthoGridUniformBufferParameters> HVPT::CreateEmptyOrt
 		OrthoGridUniformBufferParameters->VelocityGridBuffer = GraphBuilder.CreateSRV(GSystemTextures.GetDefaultStructuredBuffer(GraphBuilder, sizeof(FHVPT_GridData)));
 
 		OrthoGridUniformBufferParameters->bUseOrthoGrid = false;
-		OrthoGridUniformBufferParameters->MajorantGridBuffer = GraphBuilder.CreateSRV(GSystemTextures.GetDefaultStructuredBuffer(GraphBuilder, sizeof(FHVPT_GridData)));
+		OrthoGridUniformBufferParameters->MajorantGridBuffer = GraphBuilder.CreateSRV(GSystemTextures.GetDefaultStructuredBuffer(GraphBuilder, sizeof(FHVPT_MajorantGridData)));
 	}
 	return GraphBuilder.CreateUniformBuffer(OrthoGridUniformBufferParameters);
 }

@@ -20,6 +20,11 @@ struct FHVPT_GridData
 	uint32 PackedData[2];
 };
 
+struct FHVPT_MajorantGridData
+{
+	uint32 PackedData[1];
+};
+
 
 BEGIN_UNIFORM_BUFFER_STRUCT(FHVPTOrthoGridUniformBufferParameters, )
 	SHADER_PARAMETER(FVector3f, TopLevelGridWorldBoundsMin)
@@ -33,7 +38,7 @@ BEGIN_UNIFORM_BUFFER_STRUCT(FHVPTOrthoGridUniformBufferParameters, )
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_GridData>, EmissionGridBuffer)
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_GridData>, ScatteringGridBuffer)
 	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_GridData>, VelocityGridBuffer)
-	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_GridData>, MajorantGridBuffer)
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_MajorantGridData>, MajorantGridBuffer)
 END_UNIFORM_BUFFER_STRUCT()
 
 BEGIN_UNIFORM_BUFFER_STRUCT(FHVPTFrustumGridUniformBufferParameters, )

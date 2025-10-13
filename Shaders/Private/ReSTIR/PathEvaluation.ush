@@ -45,7 +45,7 @@ float3 HVPT_CalculateTransmittance(FRayDesc Ray, inout RandomSequence RandSequen
 	// TODO: Use preprocessor and permutations to select transmittance method
 	else if (true)
 	{
-		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance(Ray, 1.f, RandSequence);
+		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance(Ray, 1.0f, RandSequence);
 		Transmittance = Result.Transmittance;
 		bEscaped = Result.bEscaped;
 	}
@@ -216,13 +216,10 @@ float3 HVPT_EvaluateF(
 			FLightSample LightSample = SampleLight(Reservoir.GetLightId(), Reservoir.LightSample, Payload.TranslatedWorldPos, Payload.WorldNormal);
 			float3 LightRadiance = LightSample.RadianceOverPdf * LightSample.Pdf;
 
-			// Eval material
-			// TODO: Handle diffuse specular scale for non media materials
-			// TODO: Handle material eval PDF
 			FMaterialEval MaterialEval = EvalMaterial(-Ray.Direction, LightSample.Direction, Payload, float2(1.0f, 0.0f));
 
 			// Trace visibility ray
-			float3 Visibility = HVPT_CalculateLightVisibility<false>(TranslatedWorldPos, LightSample, RandSequence);
+			float3 Visibility = true ? HVPT_CalculateLightVisibility<bIsFinalShading>(TranslatedWorldPos, LightSample, RandSequence) : 1;
 
 			F *= Visibility * MaterialEval.Weight * MaterialEval.Pdf * LightRadiance;
 		}
@@ -246,7 +243,7 @@ float3 HVPT_EvaluateF(
 			float3 LightRadiance = LightSample.RadianceOverPdf * LightSample.Pdf;
 
 			float Phase = HenyeyGreensteinPhase(Properties.PhaseG, dot(-Ray.Direction, LightSample.Direction));
-			float3 ScatterVisibility = HVPT_CalculateLightVisibility<bIsFinalShading>(TranslatedWorldPos, LightSample, RandSequence);
+			float3 ScatterVisibility = true ? HVPT_CalculateLightVisibility<bIsFinalShading>(TranslatedWorldPos, LightSample, RandSequence) : 1;
 
 			F *= ScatterVisibility * Properties.SigmaSHG * Phase * LightRadiance;
 		}
