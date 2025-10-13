@@ -35,12 +35,10 @@ uint DebugFlags;
 RWTexture2D<float3> RWDebugTexture;
 
 
-// TODO: Handle early return when light PDF is 0
 #if USE_SURFACE_CONTRIBUTIONS
-float3 SampleDirectLightingSurface(
+float3 SampleDirectLightingSurface_Unshadowed(
 	FRayDesc Ray, 
 	FPathTracingPayload Payload,
-	bool bEnableShadow, 
 	inout RandomSequence RandSequence, 
 	out float OutLightPDF, 
 	out uint OutLightId, 
@@ -48,33 +46,28 @@ float3 SampleDirectLightingSurface(
 )
 {
 	// Pick a light source to sample
-	uint LightId = -1;
 	float3 LightRandValue = RandomSequence_GenerateSample3D(RandSequence);
-	FLightSample LightSample = HVPT_SampleLight(Payload.TranslatedWorldPos, Payload.WorldNormal, LightRandValue, LightId);
-
-	// TODO: Handle diffuse specular scale for non media materials
-	FMaterialEval MaterialEval = EvalMaterial(-Ray.Direction, LightSample.Direction, Payload, float2(1.0f, 0.0f));
-
-	float3 Ld = MaterialEval.Weight * LightSample.RadianceOverPdf;
-	if (bEnableShadow)
+	FLightSample LightSample = HVPT_SampleLight(Payload.TranslatedWorldPos, Payload.WorldNormal, LightRandValue, OutLightId);
+	if (LightSample.Pdf <= 0.0f)
 	{
-		Ld *= HVPT_CalculateLightVisibility<false>(Payload.TranslatedWorldPos, LightSample, RandSequence);
+		OutLightPDF = 0.0f;
+		return 0.0f;
 	}
 
+	FMaterialEval MaterialEval = EvalMaterial(-Ray.Direction, LightSample.Direction, Payload, float2(1.0f, 0.0f));
+	float3 Ld = MaterialEval.Weight * LightSample.RadianceOverPdf;
+
 	OutLightPDF = LightSample.Pdf;
-	OutLightId = LightId;
 	OutLightSample = LightRandValue.yz;
 	return Ld;
 }
 #endif
 
 
-// TODO: Handle early return when light PDF is 0
-float3 SampleDirectLighting(
+float3 SampleDirectLighting_Unshadowed(
 	FRayDesc Ray,
 	FHVPT_TrackingResult TrackingResult,
 	float3 TranslatedWorldPos,
-	bool bEnableShadow,
 	inout RandomSequence RandSequence,
 	out float OutLightPDF,
 	out uint OutLightId,
@@ -82,20 +75,18 @@ float3 SampleDirectLighting(
 )
 {
 	// Pick a light source to sample
-	uint LightId = -1;
 	float3 LightRandValue = RandomSequence_GenerateSample3D(RandSequence);
-	FLightSample LightSample = HVPT_SampleLight(TranslatedWorldPos, 0.0f, LightRandValue, LightId);
-
-	float Phase = HenyeyGreensteinPhase(TrackingResult.PhaseG, dot(-Ray.Direction, LightSample.Direction));
-
-	float3 Ld = Phase * LightSample.RadianceOverPdf;
-	if (bEnableShadow)
+	FLightSample LightSample = HVPT_SampleLight(TranslatedWorldPos, 0.0f, LightRandValue, OutLightId);
+	if (LightSample.Pdf <= 0.0f)
 	{
-		Ld *= HVPT_CalculateLightVisibility<false>(TranslatedWorldPos, LightSample, RandSequence);
+		OutLightPDF = 0.0f;
+		return 0.0f;
 	}
 
+	float Phase = HenyeyGreensteinPhase(TrackingResult.PhaseG, dot(-Ray.Direction, LightSample.Direction));
+	float3 Ld = Phase * LightSample.RadianceOverPdf;
+
 	OutLightPDF = LightSample.Pdf;
-	OutLightId = LightId;
 	OutLightSample = LightRandValue.yz;
 	return Ld;
 }
@@ -166,8 +157,8 @@ FHVPT_Reservoir ComputeInitialSample(
 
 			float OutLightPDF = 0.0f;
 			uint LightId = -1;
-			float3 Ld = SampleDirectLighting(
-				Ray, TrackingResult, TranslatedWorldPos, true, RandSequence, OutLightPDF, LightId, OutReservoir.LightSample
+			float3 Ld = SampleDirectLighting_Unshadowed(
+				Ray, TrackingResult, TranslatedWorldPos, RandSequence, OutLightPDF, LightId, OutReservoir.LightSample
 			);
 			float3 Le = TrackingResult.Emission;
 
@@ -256,8 +247,8 @@ FHVPT_Reservoir ComputeInitialSample(
 
 				float OutLightPDF = 0.0f;
 				uint LightId = -1;
-				float3 Ld = SampleDirectLightingSurface(
-					Ray, Payload, true, RandSequence, OutLightPDF, LightId, OutReservoir.LightSample
+				float3 Ld = SampleDirectLightingSurface_Unshadowed(
+					Ray, Payload, RandSequence, OutLightPDF, LightId, OutReservoir.LightSample
 				);
 				float3 Le = Payload.Radiance;
 
