@@ -46,29 +46,29 @@ struct FHVPT_Reservoir
 
 	void SetSampledPixel(uint SampledPixel)
 	{
-		PackedData[0] = (PackedData[0] & 0x0000000F) | ((SampledPixel << 4) & 0xFFFFFFF0);
+		PackedData[0] = (PackedData[0] & 0x0000000F) | (SampledPixel << 4);
 	}
 	uint GetSampledPixel()
 	{
-		return (PackedData[0] & 0xFFFFFFF0) >> 4;
+		return PackedData[0] >> 4;
 	}
 
 	void SetDepth(float Depth)
 	{
-		PackedData[1] = (PackedData[1] & 0xFFFF0000) | (f32tof16(Depth) & 0x0000FFFF);
+		PackedData[1] = (PackedData[1] & 0xFFFF0000) | f32tof16(Depth);
 	}
 	float GetDepth()
 	{
-		return f16tof32(PackedData[1] & 0x0000FFFF);
+		return f16tof32(PackedData[1]);
 	}
 
 	void SetLightId(uint LightId)
 	{
-		PackedData[1] = (PackedData[1] & 0x0000FFFF) | ((LightId << 16) & 0xFFFF0000);
+		PackedData[1] = (PackedData[1] & 0x0000FFFF) | (LightId << 16);
 	}
 	uint GetLightId()
 	{
-		return (PackedData[1] & 0xFFFF0000) >> 16;
+		return PackedData[1] >> 16;
 	}
 #endif
 };
