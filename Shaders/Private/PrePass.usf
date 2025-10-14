@@ -75,6 +75,105 @@ struct FHVPT_GBufferData
 };
 
 
+struct FHVPT_RayMarchingResult
+{
+	float3 Transmittance;
+	float Distance_Sample; // Either: distance at which transmittance reaches zero OR a distance sample along the ray if transmittance never reaches 0
+	float Distance_InitialInteraction; // Distance of the first scattering event along the ray
+	bool bEscaped;
+};
+
+FHVPT_RayMarchingResult HVPT_CreateRayMarchingResult()
+{
+	FHVPT_RayMarchingResult Result = (FHVPT_RayMarchingResult) 0;
+	Result.Transmittance = 1.0f;
+	Result.Distance_Sample = POSITIVE_INFINITY;
+	Result.Distance_InitialInteraction = POSITIVE_INFINITY;
+	Result.bEscaped = false;
+	return Result;
+}
+
+// Returns the transmittance in the XYZ channels and a distance sample in W
+// If the transmittance reaches 0, then the distance sample will always be the point at which the ray extinguished.
+// If ray escaped the volume, then the distance sample will be POSITIVE_INFINITY if bWRSDistance is false,
+// otherwise if bWRSDistance is true then a distance sample will be selected proportionally to the densities at each point visited along the ray
+// bRecordInitialInteraction will store the distance at which the optical depth first exceeded InitialInteraction_OpticalDepthThreshold
+template<bool bWRSDistance = false, bool bRecordInitialInteraction = false>
+FHVPT_RayMarchingResult HVPT_PrePass_RayMarchingTransmittance(FRayDesc Ray, float DeltaT, inout RandomSequence RandSequence, float InitialInteraction_OpticalDepthThreshold = 1.0f)
+{
+	FHVPT_RayMarchingResult Result = HVPT_CreateRayMarchingResult();
+
+	// For stochastically selecting a depth sample in the case that the ray is not fully extinguished
+	// Only used when bWRSDistance is true
+	float WeightSum = 0.0f;
+
+	float3 OpticalDepth = 0.0f;
+	bool bDone = false;
+
+	FHVPT_GridIterator TopLevelIterator = HVPT_CreateTopLevelIterator(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
+	float CurrentT = Ray.TMin;
+
+	// TODO: This loop guard appears to be required due to black magic
+	// TODO: No thread ever hits 512 iterations in practice, but removing the loop guard causes TDR when the loop contents are not trivial
+	uint LoopGuard = 0;
+	const uint MaxSteps = 512;
+	while (++LoopGuard < MaxSteps && !bDone)
+	{
+		bool bIsNextTopLevelSegment = TopLevelIterator.Next();
+		if (!bIsNextTopLevelSegment)
+		{
+			break;
+		}
+
+		FHVPT_TopLevelGridData TopLevelData = HVPT_OrthoGrid.TopLevelGridBuffer[HVPT_GetTopLevelLinearIndex(TopLevelIterator)];
+		if (IsBottomLevelAllocated(TopLevelData))
+		{
+			float T = 0.0f;
+			while (T < TopLevelIterator.GetWorldDeltaT() && !bDone)
+			{
+				float3 WorldPos = Ray.Origin + (CurrentT + T) * Ray.Direction;
+				// TODO: A custom lookup function could use the existing ortho grid top level data in case not in frustum,
+				// TODO: since we have already retrieved that data
+				FVolumeShadedResult Properties = HVPT_GetDensity(WorldPos);
+
+				// Accumulate optical depth instead of transmittance to save on exponential evaluations
+				OpticalDepth += Properties.SigmaT * DeltaT;
+
+				if (bRecordInitialInteraction && Result.Distance_InitialInteraction == POSITIVE_INFINITY && any(OpticalDepth > InitialInteraction_OpticalDepthThreshold))
+				{
+					Result.Distance_InitialInteraction = CurrentT + T;
+				}
+
+				// Terminate when transmittance is less than 1e-4
+				// -log(1e-4) ~= 9.2
+				if (all(OpticalDepth > 9.2f)) 
+				{
+					bDone = true;
+					Result.Distance_Sample = CurrentT + T;
+				}
+				else if (bWRSDistance)
+				{
+					float w = max3(Properties.SigmaT.x, Properties.SigmaT.y, Properties.SigmaT.z);
+					WeightSum += w;
+					if (RandomSequence_GenerateSample1D(RandSequence) < w / WeightSum)
+					{
+						Result.Distance_Sample = CurrentT + T;
+					}
+				}
+
+				T += DeltaT;
+			}
+		}
+
+		CurrentT += TopLevelIterator.GetWorldDeltaT();
+	}
+
+	Result.Transmittance = bDone ? 0.0f : exp(-OpticalDepth);
+	Result.bEscaped = !(bDone || LoopGuard >= MaxSteps);
+
+	return Result;
+}
+
 float3 HVPT_CalculateNormal(float3 TranslatedWorldPos)
 {
 #if DENSITY_GRADIENT_NORMAL
@@ -145,9 +244,9 @@ FHVPT_GBufferData HVPT_CalculateGBufferData(uint2 PixelCoord)
 		Ray.TMax = VolIntersect.VolumeTMax;
 
 #if TRANSMITTANCE_MODE == 0
-		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance(Ray, 1.0f, RandSequence);
+		FHVPT_RayMarchingResult Result = HVPT_PrePass_RayMarchingTransmittance(Ray, 1.0f, RandSequence);
 #elif TRANSMITTANCE_MODE == 1
-		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance<true, true>(Ray, 1.0f, RandSequence, FogComposition_OpticalDepth);
+		FHVPT_RayMarchingResult Result = HVPT_PrePass_RayMarchingTransmittance<true, true>(Ray, 1.0f, RandSequence, FogComposition_OpticalDepth);
 #endif
 
 		Transmittance = Result.Transmittance;

@@ -41,23 +41,16 @@ enum SHADING_QUALITY
 //
 
 template<SHADING_QUALITY ShadingQuality>
-float3 HVPT_CalculateTransmittance(FRayDesc Ray, inout RandomSequence RandSequence, out bool bEscaped)
+float3 HVPT_CalculateTransmittance(FRayDesc Ray, inout RandomSequence RandSequence)
 {
 	float3 Transmittance;
-	bEscaped = false;
 	if (ShadingQuality == SHADING_QUALITY_FINAL_SHADING)
 	{
-		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance(Ray, 1.0f, RandSequence);
-		Transmittance = Result.Transmittance;
-		bEscaped = Result.bEscaped;
-		//Transmittance = HVPT_RatioTracking_Majorant(Ray, RandSequence);
+		Transmittance = HVPT_RayMarchingTransmittance(Ray, 1.0f);
 	}
-	// TODO: Use preprocessor and permutations to select transmittance method
 	else if (true)
 	{
-		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance(Ray, 5.0f, RandSequence);
-		Transmittance = Result.Transmittance;
-		bEscaped = Result.bEscaped;
+		Transmittance = HVPT_RayMarchingTransmittance(Ray, 5.0f);
 	}
 	else
 	{
@@ -109,7 +102,7 @@ float3 HVPT_CalculateLightVisibility(float3 TranslatedWorldPos, FLightSample Lig
 		LightRay.TMax = VolumeIntersection.VolumeTMax;
 
 		bool bEscaped = false;
-		ScatteringVisibility = HVPT_CalculateTransmittance<ShadingQuality>(LightRay, RandSequence, bEscaped);
+		ScatteringVisibility = HVPT_CalculateTransmittance<ShadingQuality>(LightRay, RandSequence);
 
 #if APPLY_VOLUMETRIC_FOG
 		if (bEscaped)
@@ -151,8 +144,7 @@ float3 HVPT_EvaluateF(
 	FVolumeShadedResult Properties = HVPT_GetDensity(TranslatedWorldPos);
 
 	// Calculate visibility along primary ray
-	bool Dummy;
-	F *= HVPT_CalculateTransmittance<ShadingQuality>(Ray, RandSequence, Dummy);
+	F *= HVPT_CalculateTransmittance<ShadingQuality>(Ray, RandSequence);
 
 	if (!any(F > 0.0f))
 	{
@@ -182,7 +174,7 @@ float3 HVPT_EvaluateF(
 		Ray = HVPT_CreateRayDesc(TranslatedWorldPos, w_i, 0.0f, z_i);
 
 		// Calculate transmittance along ray
-		float3 Transmittance = HVPT_CalculateTransmittance<ShadingQuality>(Ray, RandSequence, Dummy);
+		float3 Transmittance = HVPT_CalculateTransmittance<ShadingQuality>(Ray, RandSequence);
 
 		F *= Transmittance * Properties.SigmaSHG * Phase;
 
