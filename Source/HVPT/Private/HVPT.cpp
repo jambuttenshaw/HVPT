@@ -92,8 +92,8 @@ static TAutoConsoleVariable<int32> CVarHVPTReSTIRInitialCandidates(
 
 static TAutoConsoleVariable<bool> CVarHVPTReSTIRShadowTermForCandidateGeneration(
 	TEXT("r.HVPT.ReSTIR.ShadowTermForCandidateGeneration"),
-	false,
-	TEXT("Include shadow term for generating candidate samples (Default = false)."),
+	true,
+	TEXT("Include shadow term for generating candidate samples (Default = true)."),
 	ECVF_RenderThreadSafe
 );
 
