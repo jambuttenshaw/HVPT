@@ -127,6 +127,17 @@ uint3 MortonDecode3(uint Morton)
 	return Voxel;
 }
 
+#if 1
+int GetLinearIndex(uint3 VoxelIndex, int3 TopLevelGridResolution)
+{
+	return MortonEncode3(VoxelIndex);
+}
+
+int3 GetVoxelIndex(int LinearIndex, int3 TopLevelGridResolution)
+{
+	return MortonDecode3(LinearIndex);
+}
+#else
 int GetLinearIndex(uint3 VoxelIndex, int3 TopLevelGridResolution)
 {
 	int SliceSize = TopLevelGridResolution.x * TopLevelGridResolution.y;
@@ -149,6 +160,7 @@ int3 GetVoxelIndex(int LinearIndex, int3 TopLevelGridResolution)
 		SliceIndex
 	);
 }
+#endif
 
 uint GetBottomLevelIndex(FHVPT_TopLevelGridData TopLevelGridData)
 {
