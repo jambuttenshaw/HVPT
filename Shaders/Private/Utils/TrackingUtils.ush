@@ -234,7 +234,6 @@ FHVPT_TrackingResult HVPT_DeltaTracking(FRayDesc Ray, inout RandomSequence RandS
 	return Result;
 }
 
-/*
 // Ratio tracking only gives the transmittance between two points
 float3 HVPT_RatioTracking(FRayDesc Ray, inout RandomSequence RandSequence)
 {
@@ -284,17 +283,7 @@ float3 HVPT_RatioTracking_Majorant(FRayDesc Ray, inout RandomSequence RandSequen
 			break;
 		}
 
-		// Get volume properties at point
-		float3 WorldPosition = Ray.Origin + Sample.Distance * Ray.Direction;
-		FVolumeShadedResult Properties = HVPT_GetDensity(WorldPosition);
-
-		Properties.SigmaT = min(Sample.SigmaMaj, Properties.SigmaT);
 		Transmittance *= Sample.MajorantTransmittance;
-
-		// TODO: Work out why the ratio tracking estimator from production volume rendering doesn't work.
-		// TODO: It was even producing negative values in some cases (before the clamping)
-		// TODO: Does production volume rendering assume this estimator is with respect to a global majorant?
-		//Transmittance *= max(0, 1.0f - Properties.SigmaT / Sample.SigmaMaj);
 
 		if (!any(Transmittance > 0))
 		{
@@ -304,7 +293,7 @@ float3 HVPT_RatioTracking_Majorant(FRayDesc Ray, inout RandomSequence RandSequen
 
 	return Transmittance;
 }
-*/
+
 
 struct FHVPT_RayMarchingResult
 {

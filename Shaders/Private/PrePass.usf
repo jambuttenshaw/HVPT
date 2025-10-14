@@ -145,9 +145,9 @@ FHVPT_GBufferData HVPT_CalculateGBufferData(uint2 PixelCoord)
 		Ray.TMax = VolIntersect.VolumeTMax;
 
 #if TRANSMITTANCE_MODE == 0
-		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance(Ray, 0.1f, RandSequence);
+		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance(Ray, 1.0f, RandSequence);
 #elif TRANSMITTANCE_MODE == 1
-		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance<true, true>(Ray, 0.1f, RandSequence, FogComposition_OpticalDepth);
+		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance<true, true>(Ray, 1.0f, RandSequence, FogComposition_OpticalDepth);
 #endif
 
 		Transmittance = Result.Transmittance;

@@ -177,7 +177,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 						if (i == 0) LoadExtraBounces(Tap.GetSampledPixel(), Tap.GetNumExtraBounces(), Bounces);
 #endif
 
-						float P_y = Luminance(HVPT_EvaluateF<false>(Tap,
+						float P_y = Luminance(HVPT_EvaluateF<SHADING_QUALITY_CANDIDATE_GENERATION>(Tap,
 #if MULTIPLE_BOUNCES
 							Bounces,
 #endif

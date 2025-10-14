@@ -15,7 +15,7 @@ void HVPT_ResampleNeighbour(
 	if (Tap.RunningSum == 0.0f)
 		return;
 
-	float P_y_hat = Luminance(HVPT_EvaluateF<false>(Tap,
+	float P_y_hat = Luminance(HVPT_EvaluateF<SHADING_QUALITY_CANDIDATE_GENERATION>(Tap,
 #if MULTIPLE_BOUNCES
 			Bounces,
 #endif

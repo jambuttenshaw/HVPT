@@ -271,7 +271,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 					}
 #endif
 
-					float P_y = Luminance(HVPT_EvaluateF<false>(Taps[i],
+					float P_y = Luminance(HVPT_EvaluateF<SHADING_QUALITY_CANDIDATE_GENERATION>(Taps[i],
 #if MULTIPLE_BOUNCES
 						Bounces,
 #endif

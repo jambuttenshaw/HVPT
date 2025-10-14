@@ -51,7 +51,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRFinalShadingRGS)
 		}
 #endif
 
-		Radiance = HVPT_EvaluateF<true>(Reservoir,
+		Radiance = HVPT_EvaluateF<SHADING_QUALITY_FINAL_SHADING>(Reservoir,
 #if MULTIPLE_BOUNCES
 			Bounces,
 #endif

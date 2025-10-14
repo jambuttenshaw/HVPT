@@ -59,7 +59,7 @@ float3 SampleDirectLightingSurface(
 	float3 Ld = MaterialEval.Weight * LightSample.RadianceOverPdf;
 	if (bUseShadowTermForCandidateGeneration)
 	{
-		Ld *= HVPT_CalculateLightVisibility<false>(Payload.TranslatedWorldPos, LightSample, RandSequence);
+		Ld *= HVPT_CalculateLightVisibility<SHADING_QUALITY_CANDIDATE_GENERATION>(Payload.TranslatedWorldPos, LightSample, RandSequence);
 	}
 
 	OutLightPDF = LightSample.Pdf;
@@ -92,7 +92,7 @@ float3 SampleDirectLighting(
 	float3 Ld = Phase * LightSample.RadianceOverPdf;
 	if (bUseShadowTermForCandidateGeneration)
 	{
-		Ld *= HVPT_CalculateLightVisibility<false>(TranslatedWorldPos, LightSample, RandSequence);
+		Ld *= HVPT_CalculateLightVisibility<SHADING_QUALITY_CANDIDATE_GENERATION>(TranslatedWorldPos, LightSample, RandSequence);
 	}
 
 	OutLightPDF = LightSample.Pdf;
@@ -370,7 +370,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 	// Evaluate PHat
 	if (FinalReservoir.RunningSum > 0.0f)
 	{
-		float PHat = Luminance(HVPT_EvaluateF<false>(FinalReservoir,
+		float PHat = Luminance(HVPT_EvaluateF<SHADING_QUALITY_CANDIDATE_GENERATION>(FinalReservoir,
 #if MULTIPLE_BOUNCES
 			FinalExtraBounces,
 #endif

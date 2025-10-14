@@ -27,31 +27,41 @@
 #endif
 
 
+enum SHADING_QUALITY
+{
+	SHADING_QUALITY_CANDIDATE_GENERATION = 0,
+	SHADING_QUALITY_TEMPORAL_REUSE,
+	SHADING_QUALITY_SPATIAL_REUSE,
+	SHADING_QUALITY_FINAL_SHADING
+};
+
+
 //
 // --- LIGHTING 
 //
 
-template<bool bIsFinalShading>
+template<SHADING_QUALITY ShadingQuality>
 float3 HVPT_CalculateTransmittance(FRayDesc Ray, inout RandomSequence RandSequence, out bool bEscaped)
 {
 	float3 Transmittance;
 	bEscaped = false;
-	if (bIsFinalShading)
+	if (ShadingQuality == SHADING_QUALITY_FINAL_SHADING)
 	{
-		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance(Ray, 0.1f, RandSequence);
+		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance(Ray, 1.0f, RandSequence);
 		Transmittance = Result.Transmittance;
 		bEscaped = Result.bEscaped;
+		//Transmittance = HVPT_RatioTracking_Majorant(Ray, RandSequence);
 	}
 	// TODO: Use preprocessor and permutations to select transmittance method
 	else if (true)
 	{
-		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance(Ray, 1.0f, RandSequence);
+		FHVPT_RayMarchingResult Result = HVPT_RayMarchingTransmittance(Ray, 5.0f, RandSequence);
 		Transmittance = Result.Transmittance;
 		bEscaped = Result.bEscaped;
 	}
 	else
 	{
-		//Transmittance = HVPT_RatioTracking_Majorant(Ray, RandSequence);
+		Transmittance = HVPT_RatioTracking(Ray, RandSequence);
 	}
 	return Transmittance;
 }
@@ -76,14 +86,14 @@ bool HVPT_IsShadowed(float3 Origin, float3 Direction, float TMin, float TMax)
 	return Payload.IsHit();
 }
 
-template<bool bIsFinalShading>
+template<SHADING_QUALITY ShadingQuality>
 float3 HVPT_CalculateLightVisibility(float3 TranslatedWorldPos, FLightSample LightSample, inout RandomSequence RandSequence)
 {
 	float3 ScatteringVisibility = 1.0f;
 
 	// Only trays opaque rays for final shading
 	// TODO: Allow this to be configured via CVars / Investigate if it is a worthwhile option
-	if (bIsFinalShading)
+	if (ShadingQuality == SHADING_QUALITY_FINAL_SHADING)
 	{
 		if (HVPT_IsShadowed(TranslatedWorldPos, LightSample.Direction, 0.0f, LightSample.Distance))
 		{
@@ -99,7 +109,7 @@ float3 HVPT_CalculateLightVisibility(float3 TranslatedWorldPos, FLightSample Lig
 		LightRay.TMax = VolumeIntersection.VolumeTMax;
 
 		bool bEscaped = false;
-		ScatteringVisibility = HVPT_CalculateTransmittance<bIsFinalShading>(LightRay, RandSequence, bEscaped);
+		ScatteringVisibility = HVPT_CalculateTransmittance<ShadingQuality>(LightRay, RandSequence, bEscaped);
 
 #if APPLY_VOLUMETRIC_FOG
 		if (bEscaped)
@@ -120,7 +130,7 @@ float3 HVPT_CalculateLightVisibility(float3 TranslatedWorldPos, FLightSample Lig
 // --- ReSTIR PATH EVALUATION
 //
 
-template<bool bIsFinalShading>
+template<SHADING_QUALITY ShadingQuality>
 float3 HVPT_EvaluateF(
 	FHVPT_Reservoir Reservoir,
 #if MULTIPLE_BOUNCES
@@ -142,7 +152,7 @@ float3 HVPT_EvaluateF(
 
 	// Calculate visibility along primary ray
 	bool Dummy;
-	F *= HVPT_CalculateTransmittance<bIsFinalShading>(Ray, RandSequence, Dummy);
+	F *= HVPT_CalculateTransmittance<ShadingQuality>(Ray, RandSequence, Dummy);
 
 	if (!any(F > 0.0f))
 	{
@@ -172,7 +182,7 @@ float3 HVPT_EvaluateF(
 		Ray = HVPT_CreateRayDesc(TranslatedWorldPos, w_i, 0.0f, z_i);
 
 		// Calculate transmittance along ray
-		float3 Transmittance = HVPT_CalculateTransmittance<bIsFinalShading>(Ray, RandSequence, Dummy);
+		float3 Transmittance = HVPT_CalculateTransmittance<ShadingQuality>(Ray, RandSequence, Dummy);
 
 		F *= Transmittance * Properties.SigmaSHG * Phase;
 
@@ -219,7 +229,7 @@ float3 HVPT_EvaluateF(
 			FMaterialEval MaterialEval = EvalMaterial(-Ray.Direction, LightSample.Direction, Payload, float2(1.0f, 0.0f));
 
 			// Trace visibility ray
-			float3 Visibility = true ? HVPT_CalculateLightVisibility<bIsFinalShading>(TranslatedWorldPos, LightSample, RandSequence) : 1;
+			float3 Visibility = HVPT_CalculateLightVisibility<ShadingQuality>(TranslatedWorldPos, LightSample, RandSequence);
 
 			F *= Visibility * MaterialEval.Weight * MaterialEval.Pdf * LightRadiance;
 		}
@@ -243,7 +253,7 @@ float3 HVPT_EvaluateF(
 			float3 LightRadiance = LightSample.RadianceOverPdf * LightSample.Pdf;
 
 			float Phase = HenyeyGreensteinPhase(Properties.PhaseG, dot(-Ray.Direction, LightSample.Direction));
-			float3 ScatterVisibility = true ? HVPT_CalculateLightVisibility<bIsFinalShading>(TranslatedWorldPos, LightSample, RandSequence) : 1;
+			float3 ScatterVisibility = HVPT_CalculateLightVisibility<ShadingQuality>(TranslatedWorldPos, LightSample, RandSequence);
 
 			F *= ScatterVisibility * Properties.SigmaSHG * Phase * LightRadiance;
 		}
