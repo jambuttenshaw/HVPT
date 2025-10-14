@@ -109,13 +109,6 @@ void SetVelocity(inout FHVPT_GridData VelocityGridData, float3 Velocity)
 	VelocityGridData.PackedData[1] = f32tof16(Velocity.z) | (VelocityGridData.PackedData[1] & 0xFFFF0000);
 }
 
-FHVPT_TopLevelGridData CreateTopLevelGridData(uint PackedData)
-{
-	FHVPT_TopLevelGridData TopLevelGridData;
-	TopLevelGridData.PackedData[0] = PackedData;
-	return TopLevelGridData;
-}
-
 uint MortonEncode3(uint3 Voxel)
 {
 	return MortonCode3(Voxel.x) | MortonCode3(Voxel.y) << 1 | MortonCode3(Voxel.z) << 2;

@@ -38,11 +38,7 @@ struct FHVPT_GridIterator
 		Direction /= TMax;
 		InvDirection = 1.0f / Direction;
 
-		float3 VoxelBoundsPos;
-		VoxelBoundsPos.x = sign(Direction.x) > 0 ? floor(RayMarchPos.x) + 1 : ceil(RayMarchPos.x) - 1;
-		VoxelBoundsPos.y = sign(Direction.y) > 0 ? floor(RayMarchPos.y) + 1 : ceil(RayMarchPos.y) - 1;
-		VoxelBoundsPos.z = sign(Direction.z) > 0 ? floor(RayMarchPos.z) + 1 : ceil(RayMarchPos.z) - 1;
-
+		float3 VoxelBoundsPos = select(sign(Direction) > 0, floor(RayMarchPos) + 1, ceil(RayMarchPos) - 1);
 		BoundsHitT = (VoxelBoundsPos - RayMarchPos) * InvDirection;
 
 		// Remove floating-point rounding error
@@ -55,6 +51,24 @@ struct FHVPT_GridIterator
 			BoundsHitT.z += abs(InvDirection.z);
 
 		DeltaT = 0.0f;
+
+		// Move ray march position halfway along the segment in the voxel
+		// This speeds up accessing data on the ray: we are interested in the midpoint of ray in voxel
+		// rather than entry/exit point
+		if (BoundsHitT.x < BoundsHitT.y)
+		{
+			if (BoundsHitT.x < BoundsHitT.z)
+				RayMarchPos += 0.5f * BoundsHitT.x * Direction;
+			else
+				RayMarchPos += 0.5f * BoundsHitT.z * Direction;
+		}
+		else
+		{
+			if (BoundsHitT.y < BoundsHitT.z)
+				RayMarchPos += 0.5f * BoundsHitT.y * Direction;
+			else
+				RayMarchPos += 0.5f * BoundsHitT.z * Direction;
+		}
 	}
 
 	bool Next()
@@ -104,19 +118,9 @@ struct FHVPT_GridIterator
 		return true;
 	}
 
-	float3 GetVoxelEntry()
-	{
-		return RayMarchPos;
-	}
-
-	float3 GetVoxelExit()
-	{
-		return RayMarchPos + DeltaT * Direction;
-	}
-
 	float3 GetVoxelMidpoint()
 	{
-		return RayMarchPos + DeltaT * Direction * 0.5f;
+		return RayMarchPos;
 	}
 
 	float GetWorldDeltaT()
