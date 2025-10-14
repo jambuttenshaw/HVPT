@@ -9,6 +9,21 @@
 #include "SceneCore.h"
 
 
+static TAutoConsoleVariable<bool> CVarHVPTForceCubicTopLevelGrid(
+	TEXT("r.HVPT.ForceCubicTopLevelGrid"),
+	true,
+	TEXT("Forces top level grid to be cubic in shape to allow for morton ordering."),
+	ECVF_RenderThreadSafe
+);
+
+static TAutoConsoleVariable<int32> CVarHVPTCubicTopLevelGridMaxSize(
+	TEXT("r.HVPT.CubicTopLevelGridMaxSize"),
+	128,
+	TEXT("Max edge length of top level grid when it is cubic."),
+	ECVF_RenderThreadSafe
+);
+
+
 struct FHVPT_RasterTileData
 {
 	uint32 TopLevelGridLinearIndex;
@@ -1130,10 +1145,23 @@ void HVPT::Private::CalculateTopLevelGridResolution(
 	TopLevelGridResolution.Y = FMath::CeilToInt(TopLevelGridResolutionAsFloat.Y);
 	TopLevelGridResolution.Z = FMath::CeilToInt(TopLevelGridResolutionAsFloat.Z);
 
-	// Clamp to a moderate limit to also handle indirection grid allocation
-	TopLevelGridResolution.X = FMath::Clamp(TopLevelGridResolution.X, 1, 128);
-	TopLevelGridResolution.Y = FMath::Clamp(TopLevelGridResolution.Y, 1, 128);
-	TopLevelGridResolution.Z = FMath::Clamp(TopLevelGridResolution.Z, 1, 256);
+	if (CVarHVPTForceCubicTopLevelGrid.GetValueOnRenderThread())
+	{
+		// Force top level grid to be a cube to allow for morton ordering of top level grid data for improved access patterns
+		uint32 CubeResolution = FMath::Clamp(
+			FMath::RoundUpToPowerOfTwo(FMath::Max3(TopLevelGridResolution.X, TopLevelGridResolution.Y, TopLevelGridResolution.Z)), 
+			1, CVarHVPTCubicTopLevelGridMaxSize.GetValueOnRenderThread());
+		TopLevelGridResolution.X = CubeResolution;
+		TopLevelGridResolution.Y = CubeResolution;
+		TopLevelGridResolution.Z = CubeResolution;
+	}
+	else
+	{
+		// Clamp to a moderate limit to also handle indirection grid allocation
+		TopLevelGridResolution.X = FMath::Clamp(TopLevelGridResolution.X, 1, 128);
+		TopLevelGridResolution.Y = FMath::Clamp(TopLevelGridResolution.Y, 1, 128);
+		TopLevelGridResolution.Z = FMath::Clamp(TopLevelGridResolution.Z, 1, 256);
+	}
 }
 
 void HVPT::Private::CalculateVoxelSize(

@@ -189,39 +189,17 @@ void SetBottomLevelVoxelResolution(inout FHVPT_TopLevelGridData TopLevelGridData
 	TopLevelGridData.PackedData[0] = (Index << 3) | ResolutionExponent;
 }
 
+
+// This is only used during voxel grid construction!! Before bottom level grid is allocated, the top level grid temporarily stores the voxel size
 float GetVoxelSize(FHVPT_TopLevelGridData TopLevelGridData)
 {
 	return asfloat(TopLevelGridData.PackedData[0]);
 }
 
+// This is only used during voxel grid construction!! Before bottom level grid is allocated, the top level grid temporarily stores the voxel size
 void SetVoxelSize(inout FHVPT_TopLevelGridData TopLevelGridData, float VoxelSize)
 {
 	TopLevelGridData.PackedData[0] = asint(VoxelSize);
-}
-
-// Convenience functions to retrieve the first element of a tile
-float3 GetExtinction(FHVPT_TopLevelGridData TopLevelGridData, StructuredBuffer<FHVPT_GridData> ExtinctionGridBuffer)
-{
-	float3 Extinction = GetExtinction(ExtinctionGridBuffer[GetBottomLevelIndex(TopLevelGridData)]);
-	return Extinction;
-}
-
-float3 GetEmission(FHVPT_TopLevelGridData TopLevelGridData, StructuredBuffer<FHVPT_GridData> EmissionGridBuffer)
-{
-	float3 Emission = GetEmission(EmissionGridBuffer[GetBottomLevelIndex(TopLevelGridData)]);
-	return Emission;
-}
-
-float3 GetScattering(FHVPT_TopLevelGridData TopLevelGridData, StructuredBuffer<FHVPT_GridData> ScatteringGridBuffer)
-{
-	float3 Scattering = GetScattering(ScatteringGridBuffer[GetBottomLevelIndex(TopLevelGridData)]);
-	return Scattering;
-}
-
-float3 GetVelocity(FHVPT_TopLevelGridData TopLevelGridData, StructuredBuffer<FHVPT_GridData> VelocityGridBuffer)
-{
-	float3 Velocity = GetVelocity(VelocityGridBuffer[GetBottomLevelIndex(TopLevelGridData)]);
-	return Velocity;
 }
 
 #endif
