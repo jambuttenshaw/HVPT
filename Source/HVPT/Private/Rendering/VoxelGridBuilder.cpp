@@ -1128,6 +1128,12 @@ void HVPT::Private::CalcGlobalBoundsAndMinimumVoxelSize(
 		{
 			GlobalMinimumVoxelSize = FMath::Max(GlobalMinimumVoxelSize, HVPT::GetMinimumVoxelSizeInsideFrustum());
 		}
+
+		if (CVarHVPTForceCubicTopLevelGrid.GetValueOnRenderThread())
+		{
+			float MaxComponent = PrimitiveBounds.BoxExtent.GetMax();
+			TopLevelGridBoundsBuilder += FBox{ PrimitiveBounds.Origin - MaxComponent, PrimitiveBounds.Origin + MaxComponent };
+		}
 	}
 }
 
