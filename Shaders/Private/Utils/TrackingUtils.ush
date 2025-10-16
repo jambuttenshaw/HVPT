@@ -344,6 +344,75 @@ float3 HVPT_RayMarchingTransmittance(FRayDesc Ray, float DeltaT)
 	return exp(-OpticalDepth);
 }
 
+
+/*
+float3 HVPT_FastRayMarchingTransmittance(FRayDesc Ray)
+{
+	FHVPT_GridIterator TopLevelIterator = HVPT_CreateTopLevelIterator(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
+	float3 OpticalDepth = 0.0f;
+
+	// TODO: This loop guard appears to be required due to black magic
+	// TODO: No thread ever hits 512 iterations in practice, but removing the loop guard causes TDR when the loop contents are not trivial
+	uint LoopGuard = 0;
+	const uint MaxSteps = 512;
+	while (++LoopGuard < MaxSteps && TopLevelIterator.Next())
+	{
+		uint TopLevelLinearIndex = HVPT_GetTopLevelLinearIndex(TopLevelIterator);
+		FHVPT_TopLevelGridData TopLevelData = HVPT_OrthoGrid.TopLevelGridBuffer[TopLevelLinearIndex];
+		if (IsBottomLevelAllocated(TopLevelData))
+		{
+			uint BottomLevelIndex = GetBottomLevelIndex(TopLevelData);
+			uint3 BottomLevelVoxelResolution = GetBottomLevelVoxelResolution(TopLevelData);
+
+			float3 TopLevelVoxelPos = TopLevelIterator.GetVoxelMidpoint();
+			float3 BottomLevelVoxelPos = frac(TopLevelVoxelPos) * BottomLevelVoxelResolution;
+			int3 BottomLevelVoxelPosAsInt = clamp(BottomLevelVoxelPos, 0, BottomLevelVoxelResolution - 1);
+			uint LinearBottomLevelVoxelPos = BottomLevelIndex + MortonEncode3(BottomLevelVoxelPosAsInt);
+
+			float3 SigmaT = GetExtinction(HVPT_OrthoGrid.ExtinctionGridBuffer[LinearBottomLevelVoxelPos]);
+
+			// Accumulate optical depth instead of transmittance to save on exponential evaluations
+			OpticalDepth += SigmaT * TopLevelIterator.GetWorldDeltaT();
+
+			// -log(1e-3) ~= 6.9 - Empirically found to be quality / performance tradeoff
+			if (all(OpticalDepth > 6.9f))
+			{
+				return 0.0f;
+			}
+		}
+	}
+
+	return exp(-OpticalDepth);
+}
+*/
+
+
+float3 HVPT_FastRayMarchingTransmittance(FRayDesc Ray)
+{
+	FHVPT_GridIterator TopLevelIterator = HVPT_CreateTopLevelIterator(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
+	float OpticalDepth = 0.0f;
+
+	const uint MaxLoops = 256;
+	uint LoopGuard = 0;
+	while (TopLevelIterator.Next() && ++LoopGuard < MaxLoops)
+	{
+		uint TopLevelLinearIndex = HVPT_GetTopLevelLinearIndex(TopLevelIterator);
+		float MeanExtinction = GetMajorantData(HVPT_OrthoGrid.MajorantGridBuffer[TopLevelLinearIndex]).Mean;
+
+		// Accumulate optical depth instead of transmittance to save on exponential evaluations
+		OpticalDepth += MeanExtinction * TopLevelIterator.GetWorldDeltaT();
+		
+		// -log(1e-3) ~= 6.9 - Empirically found to be quality / performance tradeoff
+		if (OpticalDepth > 6.9f)
+		{
+			return 0.0f;
+		}
+	}
+
+	return exp(-OpticalDepth);
+}
+
+
 // TODO: DDA Transmittance doesn't work yet
 // DDA through the bottom level grid produces significant artefacts
 /*

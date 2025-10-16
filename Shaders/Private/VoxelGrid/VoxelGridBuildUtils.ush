@@ -10,43 +10,28 @@
 struct FMajorantData
 {
 	float Majorant;
+	float Mean;
 };
 
 FMajorantData CreateMajorantData()
 {
 	FMajorantData MajorantData;
-	MajorantData.Majorant = 0.0;
+	MajorantData.Majorant = 0.0f;
+	MajorantData.Mean = 0.0f;
 	return MajorantData;
-}
-
-void UpdateMajorantData(inout FMajorantData MajorantData, float3 Value)
-{
-	float MaxValue = max(Value.x, max(Value.y, Value.z));
-	MajorantData.Majorant = max(MajorantData.Majorant, MaxValue);
-}
-
-// Updating majorant data should occur for a single media
-void UpdateMajorantData(inout FMajorantData MajorantData, FMajorantData Value)
-{
-	MajorantData.Majorant = max(MajorantData.Majorant, Value.Majorant);
-}
-
-// Merging majorant data should occur when mixing media
-void MergeMajorantData(inout FMajorantData MajorantData, FMajorantData OverlappingMajorant)
-{
-	MajorantData.Majorant += OverlappingMajorant.Majorant;
 }
 
 FMajorantData GetMajorantData(FHVPT_MajorantGridData MajorantGridData)
 {
 	FMajorantData Data;
-	Data.Majorant = asfloat(MajorantGridData.PackedData[0]);
+	Data.Majorant = f16tof32(MajorantGridData.PackedData[0]);
+	Data.Mean	  = f16tof32(MajorantGridData.PackedData[0] >> 16);
 	return Data;
 }
 
 void SetMajorantData(inout FHVPT_MajorantGridData MajorantGridData, FMajorantData MajorantData)
 {
-	MajorantGridData.PackedData[0] = asuint(MajorantData.Majorant);
+	MajorantGridData.PackedData[0] = f32tof16(MajorantData.Majorant) | f32tof16(MajorantData.Mean) << 16;
 }
 
 float3 GetExtinction(FHVPT_GridData ExtinctionGridData)

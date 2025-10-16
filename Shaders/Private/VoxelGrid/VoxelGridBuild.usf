@@ -390,6 +390,7 @@ void HVPT_BuildMajorantVoxelGridCS(
 	}
 
 	FMajorantData MajorantData = CreateMajorantData();
+	uint VoxelsContributingToMajorant = 0;
 
 	int LinearIndex = GetLinearIndex(VoxelIndex, TopLevelGridResolution);
 	FHVPT_TopLevelGridData TopLevelGridData = TopLevelGridBuffer[LinearIndex];
@@ -402,9 +403,14 @@ void HVPT_BuildMajorantVoxelGridCS(
 		{
 			int BottomLevelIndex = GetBottomLevelIndex(TopLevelGridData) + Index;
 			float3 Extinction = GetExtinction(ExtinctionGridBuffer[BottomLevelIndex]);
-			UpdateMajorantData(MajorantData, Extinction);
+
+			float MaxComponent = max(Extinction.x, max(Extinction.y, Extinction.z));
+			MajorantData.Majorant = max(MajorantData.Majorant, MaxComponent);
+			MajorantData.Mean += MaxComponent;
+			VoxelsContributingToMajorant++;
 		}
 	}
 
+	MajorantData.Mean = (VoxelsContributingToMajorant > 0) ? MajorantData.Mean / (float) VoxelsContributingToMajorant : 0;
 	SetMajorantData(RWMajorantVoxelGridBuffer[LinearIndex], MajorantData);
 }
