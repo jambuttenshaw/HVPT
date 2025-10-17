@@ -7,6 +7,8 @@
 #include "HVPTViewState.h"
 #include "Helpers.h"
 
+#include "HVPTDefinitions.h"
+
 
 class FHVPT_PrePassPS : public FGlobalShader
 {
@@ -19,13 +21,14 @@ public:
 	class FTransmittanceMode : SHADER_PERMUTATION_INT("TRANSMITTANCE_MODE", 2);
 	class FStochasticGBufferWrites : SHADER_PERMUTATION_BOOL("STOCHASTIC_GBUFFER_WRITES");
 	class FWriteVelocity : SHADER_PERMUTATION_BOOL("WRITE_VELOCITY");
-	class FDebugVisualizeVelocity : SHADER_PERMUTATION_BOOL("DEBUG_VISUALIZE_VELOCITY");
+	//class FDebugVisualizeVelocity : SHADER_PERMUTATION_BOOL("DEBUG_VISUALIZE_VELOCITY");
+	class FDebugOutputEnabled : SHADER_PERMUTATION_BOOL("DEBUG_OUTPUT_ENABLED");
 	using FPermutationDomain = TShaderPermutationDomain<FWriteGBuffer,
 		FDensityGradientAsNormal,
 		FTransmittanceMode,
 		FStochasticGBufferWrites,
 		FWriteVelocity,
-		FDebugVisualizeVelocity>;
+		FDebugOutputEnabled>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
@@ -43,6 +46,9 @@ public:
 
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<half2>, RWFeatureTexture)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWVelocityTexture)
+
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float3>, RWDebugTexture)
+		SHADER_PARAMETER(uint32, DebugFlags)
 
 		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, InputViewPort)
 		SHADER_PARAMETER_STRUCT(FScreenPassTextureViewportParameters, OutputViewPort)
@@ -101,6 +107,12 @@ void HVPT::RenderPrePass(
 	PassParameters->RWFeatureTexture = GraphBuilder.CreateUAV(State.FeatureTexture, ERDGUnorderedAccessViewFlags::None, PF_G16R16F);
 	PassParameters->RWVelocityTexture = GraphBuilder.CreateUAV(SceneTextures.Velocity);
 
+	if (State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE)
+	{
+		PassParameters->RWDebugTexture = GraphBuilder.CreateUAV(State.DebugTexture);
+		PassParameters->DebugFlags = State.DebugFlags;
+	}
+
 	// Get GBuffer
 	TStaticArray<FTextureRenderTargetBinding, MaxSimultaneousRenderTargets> RenderTargetTextures;
 	uint32 RenderTargetTextureCount = SceneTextures.GetGBufferRenderTargets(RenderTargetTextures);
@@ -118,7 +130,7 @@ void HVPT::RenderPrePass(
 	Permutation.Set<FHVPT_PrePassPS::FTransmittanceMode>(HVPT::GetTransmittanceMode());
 	Permutation.Set<FHVPT_PrePassPS::FStochasticGBufferWrites>(HVPT::GetStochasticGBufferWrites());
 	Permutation.Set<FHVPT_PrePassPS::FWriteVelocity>(HVPT::ShouldWriteVelocity());
-	Permutation.Set<FHVPT_PrePassPS::FDebugVisualizeVelocity>(HVPT::GetVisualizeVelocity());
+	Permutation.Set<FHVPT_PrePassPS::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 
 	FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(ViewInfo.FeatureLevel);
 	TShaderMapRef<FScreenPassVS> VertexShader(ShaderMap);

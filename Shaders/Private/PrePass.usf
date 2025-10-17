@@ -60,6 +60,11 @@ float FogComposition_OpticalDepth;
 RWTexture2D<float2> RWFeatureTexture;
 RWTexture2D<float4> RWVelocityTexture;
 
+#if DEBUG_OUTPUT_ENABLED
+RWTexture2D<float3> RWDebugTexture;
+uint DebugFlags;
+#endif
+
 
 struct FHVPT_GBufferData
 {
@@ -240,8 +245,8 @@ FHVPT_GBufferData HVPT_CalculateGBufferData(uint2 PixelCoord)
 	FVolumeIntersection VolIntersect = HVPT_Intersect(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
 	if (VolIntersect.HitVolume())
 	{
-		Ray.TMin = VolIntersect.VolumeTMin;
-		Ray.TMax = VolIntersect.VolumeTMax;
+		Ray.TMin = max(Ray.TMin, VolIntersect.VolumeTMin);
+		Ray.TMax = min(Ray.TMax, VolIntersect.VolumeTMax);
 
 #if TRANSMITTANCE_MODE == 0
 		FHVPT_RayMarchingResult Result = HVPT_PrePass_RayMarchingTransmittance(Ray, 1.0f, RandSequence);
@@ -318,13 +323,13 @@ void HVPT_PrePassPS(
 	uint2 PixelPos = min(SvPosition.xy + InputViewPort_ViewportMin, InputViewPort_ViewportMax - 1);
 	FHVPT_GBufferData VolumeGBufferData = HVPT_CalculateGBufferData(PixelPos);
 
+	RWFeatureTexture[PixelPos] = float2(VolumeGBufferData.Transmittance, VolumeGBufferData.InitialInteractionDistance);
+
 	if (VolumeGBufferData.DeviceZ == 0.0f)
 	{
 		// No volume exists for this pixel
 		discard;
 	}
-
-	RWFeatureTexture[PixelPos] = float2(VolumeGBufferData.Transmittance, VolumeGBufferData.InitialInteractionDistance);
 
 #if WRITE_VELOCITY
 	RWVelocityTexture[PixelPos] = VolumeGBufferData.Velocity;

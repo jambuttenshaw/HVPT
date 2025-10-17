@@ -59,7 +59,7 @@ struct FHVPT_MajorantSamplingContext
 
 		RayOriginToSegmentDistance = InVolumeTMin;
 
-		CurrentSegmentT = 0.0f; // SegmentWorldTMax should be 0 before DDA.Next() is called
+		CurrentSegmentT = POSITIVE_INFINITY;
 		SigmaMaj = 0.0f;
 		MajorantTransmittance = 1.0f;
 		bDone = false;
@@ -82,7 +82,7 @@ struct FHVPT_MajorantSamplingContext
 		}
 
 		int LoopGuard = 0;
-		const int MaxSteps = 512;
+		const int MaxSteps = 256;
 		while (LoopGuard++ < MaxSteps)
 		{
 			// Progress to next segment if required
@@ -302,17 +302,8 @@ float3 HVPT_RayMarchingTransmittance(FRayDesc Ray, float DeltaT)
 	FHVPT_GridIterator TopLevelIterator = HVPT_CreateTopLevelIterator(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
 	float CurrentT = Ray.TMin;
 
-	// TODO: This loop guard appears to be required due to black magic
-	// TODO: No thread ever hits 512 iterations in practice, but removing the loop guard causes TDR when the loop contents are not trivial
-	uint LoopGuard = 0;
-	const uint MaxSteps = 512;
-	while (++LoopGuard < MaxSteps)
+	while (TopLevelIterator.Next())
 	{
-		if (!TopLevelIterator.Next())
-		{
-			break;
-		}
-
 		FHVPT_TopLevelGridData TopLevelData = HVPT_OrthoGrid.TopLevelGridBuffer[HVPT_GetTopLevelLinearIndex(TopLevelIterator)];
 		if (IsBottomLevelAllocated(TopLevelData))
 		{
@@ -386,15 +377,12 @@ float3 HVPT_FastRayMarchingTransmittance(FRayDesc Ray)
 }
 */
 
-
 float3 HVPT_FastRayMarchingTransmittance(FRayDesc Ray)
 {
 	FHVPT_GridIterator TopLevelIterator = HVPT_CreateTopLevelIterator(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
 	float OpticalDepth = 0.0f;
 
-	const uint MaxLoops = 256;
-	uint LoopGuard = 0;
-	while (TopLevelIterator.Next() && ++LoopGuard < MaxLoops)
+	while (TopLevelIterator.Next())
 	{
 		uint TopLevelLinearIndex = HVPT_GetTopLevelLinearIndex(TopLevelIterator);
 		float MeanExtinction = GetMajorantData(HVPT_OrthoGrid.MajorantGridBuffer[TopLevelLinearIndex]).Mean;
@@ -411,7 +399,6 @@ float3 HVPT_FastRayMarchingTransmittance(FRayDesc Ray)
 
 	return exp(-OpticalDepth);
 }
-
 
 // TODO: DDA Transmittance doesn't work yet
 // DDA through the bottom level grid produces significant artefacts

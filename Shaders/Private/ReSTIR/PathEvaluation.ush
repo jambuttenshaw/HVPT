@@ -50,7 +50,6 @@ float3 HVPT_CalculateTransmittance(FRayDesc Ray, inout RandomSequence RandSequen
 	}
 	else if (ShadingQuality == SHADING_QUALITY_CANDIDATE_GENERATION)
 	{
-		//Transmittance = HVPT_RayMarchingTransmittance(Ray, 5.0f);
 		Transmittance = HVPT_FastRayMarchingTransmittance(Ray);
 	}
 	else
@@ -95,12 +94,12 @@ float3 HVPT_CalculateLightVisibility(float3 TranslatedWorldPos, FLightSample Lig
 		}
 	}
 
-	FRayDesc LightRay = HVPT_CreateRayDesc < false > (TranslatedWorldPos, LightSample.Direction, 0.0f, LightSample.Distance);
+	FRayDesc LightRay = HVPT_CreateRayDesc<false>(TranslatedWorldPos, LightSample.Direction, 0.0f, LightSample.Distance);
 	FVolumeIntersection VolumeIntersection = HVPT_Intersect(LightRay.Origin, LightRay.Direction, LightRay.TMin, LightRay.TMax);
 	if (VolumeIntersection.HitVolume())
 	{
-		LightRay.TMin = VolumeIntersection.VolumeTMin;
-		LightRay.TMax = VolumeIntersection.VolumeTMax;
+		LightRay.TMin = max(LightRay.TMin, VolumeIntersection.VolumeTMin);
+		LightRay.TMax = min(LightRay.TMax, VolumeIntersection.VolumeTMax);
 
 		bool bEscaped = false;
 		ScatteringVisibility = HVPT_CalculateTransmittance<ShadingQuality>(LightRay, RandSequence);
@@ -139,6 +138,9 @@ float3 HVPT_EvaluateF(
 
 	// Set TMax according to hit point of reservoir
 	Ray.TMax = Reservoir.GetDepth();
+	FVolumeIntersection VolumeIntersection = HVPT_Intersect(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
+	Ray.TMin = max(Ray.TMin, VolumeIntersection.VolumeTMin);
+	Ray.TMax = min(Ray.TMax, VolumeIntersection.VolumeTMax);
 
 	// Sample volume properties at scattering event
 	float3 TranslatedWorldPos = Ray.Origin + Ray.TMax * Ray.Direction;
@@ -173,6 +175,9 @@ float3 HVPT_EvaluateF(
 		float Phase = HenyeyGreensteinPhase(Properties.PhaseG, dot(-Ray.Direction, w_i));
 
 		Ray = HVPT_CreateRayDesc(TranslatedWorldPos, w_i, 0.0f, z_i);
+		VolumeIntersection = HVPT_Intersect(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
+		Ray.TMin = max(Ray.TMin, VolumeIntersection.VolumeTMin);
+		Ray.TMax = min(Ray.TMax, VolumeIntersection.VolumeTMax);
 
 		// Calculate transmittance along ray
 		float3 Transmittance = HVPT_CalculateTransmittance<ShadingQuality>(Ray, RandSequence);
