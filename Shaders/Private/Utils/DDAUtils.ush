@@ -136,7 +136,6 @@ FHVPT_GridIterator HVPT_CreateTopLevelIterator(float3 Origin, float3 Direction, 
 
 FHVPT_GridIterator HVPT_CreateBottomLevelIterator(float3 TopLevelVoxelEntry, float3 TopLevelVoxelExit, float TopLevelVoxelToWorldScale, uint3 BottomLevelVoxelResolution)
 {
-	// TODO: I believe there is some issue in this function to be diagnosed.
 	float3 BottomLevelRayBegin = frac(TopLevelVoxelEntry) * BottomLevelVoxelResolution;
 	float3 BottomLevelRayEnd = frac(TopLevelVoxelExit) * BottomLevelVoxelResolution;
 

@@ -335,18 +335,13 @@ float3 HVPT_RayMarchingTransmittance(FRayDesc Ray, float DeltaT)
 	return exp(-OpticalDepth);
 }
 
-
 /*
 float3 HVPT_FastRayMarchingTransmittance(FRayDesc Ray)
 {
 	FHVPT_GridIterator TopLevelIterator = HVPT_CreateTopLevelIterator(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
 	float3 OpticalDepth = 0.0f;
 
-	// TODO: This loop guard appears to be required due to black magic
-	// TODO: No thread ever hits 512 iterations in practice, but removing the loop guard causes TDR when the loop contents are not trivial
-	uint LoopGuard = 0;
-	const uint MaxSteps = 512;
-	while (++LoopGuard < MaxSteps && TopLevelIterator.Next())
+	while (TopLevelIterator.Next())
 	{
 		uint TopLevelLinearIndex = HVPT_GetTopLevelLinearIndex(TopLevelIterator);
 		FHVPT_TopLevelGridData TopLevelData = HVPT_OrthoGrid.TopLevelGridBuffer[TopLevelLinearIndex];
@@ -377,7 +372,9 @@ float3 HVPT_FastRayMarchingTransmittance(FRayDesc Ray)
 }
 */
 
-float3 HVPT_FastRayMarchingTransmittance(FRayDesc Ray)
+// Fast approximate transmittance calculation that only visits cells
+// in the top-level grid and uses the mean transmittance of the entire cell
+float3 HVPT_TopLevelDDATransmittance(FRayDesc Ray)
 {
 	FHVPT_GridIterator TopLevelIterator = HVPT_CreateTopLevelIterator(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
 	float OpticalDepth = 0.0f;
@@ -400,60 +397,43 @@ float3 HVPT_FastRayMarchingTransmittance(FRayDesc Ray)
 	return exp(-OpticalDepth);
 }
 
-// TODO: DDA Transmittance doesn't work yet
-// DDA through the bottom level grid produces significant artefacts
-/*
+
 float3 HVPT_DDATransmittance(FRayDesc Ray)
 {
-	float3 Transmittance = 1.0f;
-
 	FHVPT_GridIterator TopLevelIterator = HVPT_CreateTopLevelIterator(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
+	float OpticalDepth = 0.0f;
 
-	// TODO: This loop guard appears to be required due to black magic
-	// TODO: No thread ever hits 512 iterations in practice, but removing the loop guard causes TDR when the loop contents are not trivial
-	uint LoopGuard = 0;
-	const uint MaxSteps = 512;
-	while (LoopGuard++ < MaxSteps)
+	while (TopLevelIterator.Next())
 	{
-		bool bIsNextTopLevelSegment = TopLevelIterator.Next();
-		if (!bIsNextTopLevelSegment)
-		{
-			break;
-		}
-
 		FHVPT_TopLevelGridData TopLevelData = HVPT_OrthoGrid.TopLevelGridBuffer[HVPT_GetTopLevelLinearIndex(TopLevelIterator)];
+		uint FirstBottomLevelIndex = GetBottomLevelIndex(TopLevelData);
+
 		if (IsBottomLevelAllocated(TopLevelData))
 		{
 			FHVPT_GridIterator BottomLevelIterator = HVPT_CreateBottomLevelIterator(
-				TopLevelIterator.GetVoxelEntry(), TopLevelIterator.GetVoxelExit(), TopLevelIterator.GetDistanceScale(), GetBottomLevelVoxelResolution(TopLevelData)
+				TopLevelIterator.GetVoxelEntry(),
+				TopLevelIterator.GetVoxelExit(),
+				TopLevelIterator.GetDistanceScale(),
+				GetBottomLevelVoxelResolution(TopLevelData)
 			);
-			uint BottomLevelIndex = GetBottomLevelIndex(TopLevelData);
-
-			uint LoopGuard = 0;
-			while (LoopGuard++ < MaxSteps)
+			while (BottomLevelIterator.Next())
 			{
-				bool bIsNextBottomLevelSegment = BottomLevelIterator.Next();
-				if (!bIsNextBottomLevelSegment)
+				uint BottomLevelIndex = HVPT_GetBottomLevelLinearIndex(BottomLevelIterator, FirstBottomLevelIndex);
+				float Extinction = GetExtinction(HVPT_OrthoGrid.ExtinctionGridBuffer[BottomLevelIndex]);
+
+				// Accumulate optical depth instead of transmittance to save on exponential evaluations
+				OpticalDepth += Extinction * BottomLevelIterator.GetWorldDeltaT();
+				
+				// -log(1e-3) ~= 6.9 - Empirically found to be quality / performance tradeoff
+				if (OpticalDepth > 6.9f)
 				{
-					//Debug = StepCount;
-					break;
+					return 0.0f;
 				}
-
-				// Get distance travelled through bottom level voxel in world space
-				float DeltaT = BottomLevelIterator.GetWorldDeltaT();
-
-				// Get properties
-				uint LinearBottomLevelVoxelPos = HVPT_GetBottomLevelLinearIndex(BottomLevelIterator, BottomLevelIndex);
-				float3 SigmaT = GetExtinction(HVPT_OrthoGrid.ExtinctionGridBuffer[LinearBottomLevelVoxelPos]);
-
-				// Accumulate optical depth
-				Transmittance *= exp(-SigmaT * DeltaT);
 			}
 		}
 	}
 
-	return Transmittance;
+	return exp(-OpticalDepth);
 }
-*/
 
 #endif

@@ -46,15 +46,15 @@ float3 HVPT_CalculateTransmittance(FRayDesc Ray, inout RandomSequence RandSequen
 	float3 Transmittance;
 	if (ShadingQuality == SHADING_QUALITY_FINAL_SHADING)
 	{
-		Transmittance = HVPT_RayMarchingTransmittance(Ray, 1.0f);
+		Transmittance = HVPT_DDATransmittance(Ray);
 	}
 	else if (ShadingQuality == SHADING_QUALITY_CANDIDATE_GENERATION)
 	{
-		Transmittance = HVPT_FastRayMarchingTransmittance(Ray);
+		Transmittance = HVPT_TopLevelDDATransmittance(Ray);
 	}
 	else
 	{
-		Transmittance = HVPT_RayMarchingTransmittance(Ray, 2.5f);
+		Transmittance = HVPT_DDATransmittance(Ray);
 	}
 	return Transmittance;
 }
