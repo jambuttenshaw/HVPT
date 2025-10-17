@@ -122,6 +122,8 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 		if (IsWithinRange(TapPos, (uint2)View.ViewSizeAndInvSize.xy))
 		{
 			FHVPT_Reservoir Tap = InReservoirs[HVPT_GetReservoirIndex((uint2)TapPos)];
+			if (Tap.M == 0)
+				continue;
 
 			float MISWeight = 1.0f;
 
@@ -153,6 +155,8 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 						continue;
 
 					FHVPT_Reservoir Tap_j = InReservoirs[HVPT_GetReservoirIndex((uint2)TapPos_j)];
+					if (Tap_j.M == 0)
+						continue;
 
 					K += Tap_j.M;
 

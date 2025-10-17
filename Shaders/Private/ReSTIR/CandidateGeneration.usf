@@ -22,6 +22,7 @@
 
 // Uses a copy of the scene depth, that was made before writing HVPT into it
 Texture2D<float> SceneDepthTexture_Copy;
+Texture2D<float2> FeatureTexture;
 
 uint TemporalSeed;
 
@@ -312,6 +313,15 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 {
 	uint2 PixelCoord = DispatchRaysIndex().xy;
 	FHVPT_Reservoir FinalReservoir = HVPT_CreateNewReservoir();
+
+	// We have already performed a prepass that determines if any media exists for this pixel
+	// - if there is no media, there is no point attempting to produce candidates
+	if (FeatureTexture[PixelCoord].r == 1.0f)
+	{
+		// Output an empty reservoir
+		RWCurrentReservoirs[HVPT_GetReservoirIndex(PixelCoord)] = FinalReservoir;
+		return;
+	}
 
 #if MULTIPLE_BOUNCES
 	FHVPT_Bounce FinalExtraBounces[MAX_EXTRA_BOUNCES];

@@ -194,6 +194,8 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 	for (uint i = 0; i < NumUsedReservoirs; i++)
 	{
 		float MISWeight = 1.0f;
+		if (Taps[i].M == 0)
+			continue;
 
 		if (Taps[i].P_y > 0.0f)
 		{

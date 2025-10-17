@@ -101,6 +101,7 @@ public:
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
 
 		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float>, SceneDepthTexture_Copy)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float2>, FeatureTexture)
 
 		SHADER_PARAMETER(uint32, NumInitialCandidates)
 		SHADER_PARAMETER(uint32, bUseShadowTermForCandidateGeneration)
@@ -418,6 +419,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 		PopulateCommonParameters(&PassParameters->Common, 0);
 
 		PassParameters->SceneDepthTexture_Copy = GraphBuilder.CreateSRV(State.DepthBufferCopy);
+		PassParameters->FeatureTexture = GraphBuilder.CreateSRV(State.FeatureTexture);
 
 		PassParameters->NumInitialCandidates = HVPT::GetNumInitialCandidates();
 		PassParameters->bUseShadowTermForCandidateGeneration = HVPT::GetUseShadowTermForCandidateGeneration();
