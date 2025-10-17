@@ -43,20 +43,17 @@ enum SHADING_QUALITY
 template<SHADING_QUALITY ShadingQuality>
 float3 HVPT_CalculateTransmittance(FRayDesc Ray, inout RandomSequence RandSequence)
 {
-	float3 Transmittance;
-	if (ShadingQuality == SHADING_QUALITY_FINAL_SHADING)
+	switch (ShadingQuality)
 	{
-		Transmittance = HVPT_DDATransmittance(Ray);
+	case SHADING_QUALITY_CANDIDATE_GENERATION:
+		return HVPT_TopLevelDDATransmittance(Ray);
+	case SHADING_QUALITY_TEMPORAL_REUSE:
+	case SHADING_QUALITY_SPATIAL_REUSE:
+	case SHADING_QUALITY_FINAL_SHADING:
+		return HVPT_DDATransmittance(Ray);
 	}
-	else if (ShadingQuality == SHADING_QUALITY_CANDIDATE_GENERATION)
-	{
-		Transmittance = HVPT_TopLevelDDATransmittance(Ray);
-	}
-	else
-	{
-		Transmittance = HVPT_DDATransmittance(Ray);
-	}
-	return Transmittance;
+	// Should never be reached
+	return 1;
 }
 
 // Returns true if visible

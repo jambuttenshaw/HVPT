@@ -295,83 +295,6 @@ float3 HVPT_RatioTracking_Majorant(FRayDesc Ray, inout RandomSequence RandSequen
 }
 
 
-float3 HVPT_RayMarchingTransmittance(FRayDesc Ray, float DeltaT)
-{
-	float3 OpticalDepth = 0.0f;
-
-	FHVPT_GridIterator TopLevelIterator = HVPT_CreateTopLevelIterator(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
-	float CurrentT = Ray.TMin;
-
-	while (TopLevelIterator.Next())
-	{
-		FHVPT_TopLevelGridData TopLevelData = HVPT_OrthoGrid.TopLevelGridBuffer[HVPT_GetTopLevelLinearIndex(TopLevelIterator)];
-		if (IsBottomLevelAllocated(TopLevelData))
-		{
-			float T = 0.0f;
-			while (T < TopLevelIterator.GetWorldDeltaT())
-			{
-				float3 WorldPos = Ray.Origin + (CurrentT + T) * Ray.Direction;
-				// TODO: A custom lookup function could use the existing ortho grid top level data in case not in frustum,
-				// TODO: since we have already retrieved that data
-				FVolumeShadedResult Properties = HVPT_GetDensity(WorldPos);
-
-				// Accumulate optical depth instead of transmittance to save on exponential evaluations
-				OpticalDepth += Properties.SigmaT * DeltaT;
-
-				// Terminate when transmittance is less than 1e-4
-				// -log(1e-4) ~= 9.2
-				if (all(OpticalDepth > 9.2f)) 
-				{
-					return 0.0f;
-				}
-
-				T += DeltaT;
-			}
-		}
-
-		CurrentT += TopLevelIterator.GetWorldDeltaT();
-	}
-
-	return exp(-OpticalDepth);
-}
-
-/*
-float3 HVPT_FastRayMarchingTransmittance(FRayDesc Ray)
-{
-	FHVPT_GridIterator TopLevelIterator = HVPT_CreateTopLevelIterator(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
-	float3 OpticalDepth = 0.0f;
-
-	while (TopLevelIterator.Next())
-	{
-		uint TopLevelLinearIndex = HVPT_GetTopLevelLinearIndex(TopLevelIterator);
-		FHVPT_TopLevelGridData TopLevelData = HVPT_OrthoGrid.TopLevelGridBuffer[TopLevelLinearIndex];
-		if (IsBottomLevelAllocated(TopLevelData))
-		{
-			uint BottomLevelIndex = GetBottomLevelIndex(TopLevelData);
-			uint3 BottomLevelVoxelResolution = GetBottomLevelVoxelResolution(TopLevelData);
-
-			float3 TopLevelVoxelPos = TopLevelIterator.GetVoxelMidpoint();
-			float3 BottomLevelVoxelPos = frac(TopLevelVoxelPos) * BottomLevelVoxelResolution;
-			int3 BottomLevelVoxelPosAsInt = clamp(BottomLevelVoxelPos, 0, BottomLevelVoxelResolution - 1);
-			uint LinearBottomLevelVoxelPos = BottomLevelIndex + MortonEncode3(BottomLevelVoxelPosAsInt);
-
-			float3 SigmaT = GetExtinction(HVPT_OrthoGrid.ExtinctionGridBuffer[LinearBottomLevelVoxelPos]);
-
-			// Accumulate optical depth instead of transmittance to save on exponential evaluations
-			OpticalDepth += SigmaT * TopLevelIterator.GetWorldDeltaT();
-
-			// -log(1e-3) ~= 6.9 - Empirically found to be quality / performance tradeoff
-			if (all(OpticalDepth > 6.9f))
-			{
-				return 0.0f;
-			}
-		}
-	}
-
-	return exp(-OpticalDepth);
-}
-*/
-
 // Fast approximate transmittance calculation that only visits cells
 // in the top-level grid and uses the mean transmittance of the entire cell
 float3 HVPT_TopLevelDDATransmittance(FRayDesc Ray)
@@ -419,10 +342,10 @@ float3 HVPT_DDATransmittance(FRayDesc Ray)
 			while (BottomLevelIterator.Next())
 			{
 				uint BottomLevelIndex = HVPT_GetBottomLevelLinearIndex(BottomLevelIterator, FirstBottomLevelIndex);
-				float Extinction = GetExtinction(HVPT_OrthoGrid.ExtinctionGridBuffer[BottomLevelIndex]);
+				float3 Extinction = GetExtinction(HVPT_OrthoGrid.ExtinctionGridBuffer[BottomLevelIndex]);
 
 				// Accumulate optical depth instead of transmittance to save on exponential evaluations
-				OpticalDepth += Extinction * BottomLevelIterator.GetWorldDeltaT();
+				OpticalDepth += max3(Extinction.x, Extinction.y, Extinction.z) * BottomLevelIterator.GetWorldDeltaT();
 				
 				// -log(1e-3) ~= 6.9 - Empirically found to be quality / performance tradeoff
 				if (OpticalDepth > 6.9f)
