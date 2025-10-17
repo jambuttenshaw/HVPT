@@ -9,6 +9,8 @@
 
 
 // DDA context used to iterate through cells in the grid along a ray
+// ALWAYS use GetVoxelIndex() to access data specific to a cell in the grid
+// - it will not suffer from floating point precision errors that GetVoxelEntry/Exit will!
 struct FHVPT_GridIterator
 {
 	int3 CurrentVoxelPos; // Current index in the voxel grid
@@ -19,10 +21,9 @@ struct FHVPT_GridIterator
 	float TMax; // End T
 
 	float3 Direction;
-	float3 InvDirection;
+	float3 Delta; // Distance to move along each axis - equal to abs(1 / Direction)
 
 	float3 BoundsHitT; // T value for next hit on each axis
-	float4 Step;
 
 	float DistanceScale; // Scale factor for distances out of voxel space
 
@@ -41,14 +42,10 @@ struct FHVPT_GridIterator
 		DistanceScale = WorldSpace_TMax / TMax;
 
 		Direction /= TMax;
-		InvDirection = 1.0f / Direction;
-		InvDirection = select(Direction == 0.0f, POSITIVE_INFINITY, InvDirection);
-
-		Step.xyz = sign(Direction);
-		Step.w = 0;
+		Delta = select(Direction == 0.0f, POSITIVE_INFINITY, abs(1.0f / Direction));
 
 		float3 VoxelBoundsPos = select(sign(Direction) > 0, floor(VoxelSpaceBegin) + 1, ceil(VoxelSpaceBegin) - 1);
-		BoundsHitT = abs((VoxelBoundsPos - VoxelSpaceBegin) * InvDirection);
+		BoundsHitT = abs((VoxelBoundsPos - VoxelSpaceBegin) * Delta);
 
 		DeltaT = 0.0f;
 		NextVoxelPos = floor(VoxelSpaceBegin);
@@ -57,44 +54,20 @@ struct FHVPT_GridIterator
 
 	bool Next()
 	{
-		if (any(NextVoxelPos < 0) || any(NextVoxelPos >= HVPT_OrthoGrid.TopLevelGridResolution) || (DeltaT + RayMarchT) >= TMax)
+		if ((DeltaT + RayMarchT) >= TMax)
 		{
 			return false;
 		}
 
 		CurrentVoxelPos = NextVoxelPos;
 		RayMarchT += DeltaT;
+		
+		float MinComponent = min3(BoundsHitT.x, BoundsHitT.y, BoundsHitT.z);
+		uint3 Axis = BoundsHitT == MinComponent;
 
-		if (BoundsHitT.x < BoundsHitT.y)
-		{
-			if (BoundsHitT.x < BoundsHitT.z)
-			{
-				DeltaT = BoundsHitT.x - RayMarchT;
-				BoundsHitT.x += abs(InvDirection.x);
-				NextVoxelPos += Step.xww;
-			}
-			else
-			{
-				DeltaT = BoundsHitT.z - RayMarchT;
-				BoundsHitT.z += abs(InvDirection.z);
-				NextVoxelPos += Step.wwz;
-			}
-		}
-		else
-		{
-			if (BoundsHitT.y < BoundsHitT.z)
-			{
-				DeltaT = BoundsHitT.y - RayMarchT;
-				BoundsHitT.y += abs(InvDirection.y);
-				NextVoxelPos += Step.wyw;
-			}
-			else
-			{
-				DeltaT = BoundsHitT.z - RayMarchT;
-				BoundsHitT.z += abs(InvDirection.z);
-				NextVoxelPos += Step.wwz;
-			}
-		}
+		DeltaT = MinComponent - RayMarchT;
+		BoundsHitT += Axis * Delta;
+		NextVoxelPos += Axis * sign(Direction);
 
 		// Clip voxel delta-t by overall voxel ray-length.
 		if (RayMarchT + DeltaT > TMax)
