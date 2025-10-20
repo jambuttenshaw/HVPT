@@ -21,7 +21,7 @@ struct FHVPT_GridIterator
 	float TMax; // End T
 
 	float3 Direction;
-	float3 Delta; // Distance to move along each axis - equal to abs(1 / Direction)
+	float3 DeltaStep; // Distance to move along each axis - equal to abs(1 / Direction)
 
 	float3 BoundsHitT; // T value for next hit on each axis
 
@@ -38,35 +38,46 @@ struct FHVPT_GridIterator
 
 		RayMarchT = 0.0f;
 		TMax = length(Direction);
+		if (isinf(TMax) || isnan(TMax))
+			TMax = 0.0f;
 
-		DistanceScale = WorldSpace_TMax / TMax;
+		DistanceScale = TMax > 0.0f ? WorldSpace_TMax / TMax : 0.0f;
 
 		Direction /= TMax;
-		Delta = select(Direction == 0.0f, POSITIVE_INFINITY, abs(1.0f / Direction));
+		DeltaStep = select(Direction == 0.0f, POSITIVE_INFINITY, abs(1.0f / Direction));
 
 		float3 VoxelBoundsPos = select(sign(Direction) > 0, floor(VoxelSpaceBegin) + 1, ceil(VoxelSpaceBegin) - 1);
-		BoundsHitT = abs((VoxelBoundsPos - VoxelSpaceBegin) * Delta);
+		BoundsHitT = abs((VoxelBoundsPos - VoxelSpaceBegin) * DeltaStep);
 
 		DeltaT = 0.0f;
 		NextVoxelPos = floor(VoxelSpaceBegin);
 		CurrentVoxelPos = NextVoxelPos;
 	}
 
+	// Creates an invalid iterator where calling Next() will always return false
+	void InitInvalid()
+	{
+		DeltaT = FLOAT_MAX;
+		TMax = 0.0f;
+	}
+
 	bool Next()
 	{
-		if ((DeltaT + RayMarchT) >= TMax)
+		if (DeltaT + RayMarchT >= TMax)
 		{
+			DeltaT = 0.0f;
 			return false;
 		}
 
 		CurrentVoxelPos = NextVoxelPos;
 		RayMarchT += DeltaT;
-		
+
+		// Select axis that will cross a voxel boundary next
 		float MinComponent = min3(BoundsHitT.x, BoundsHitT.y, BoundsHitT.z);
 		uint3 Axis = BoundsHitT == MinComponent;
 
 		DeltaT = MinComponent - RayMarchT;
-		BoundsHitT += Axis * Delta;
+		BoundsHitT += Axis * DeltaStep;
 		NextVoxelPos += Axis * sign(Direction);
 
 		// Clip voxel delta-t by overall voxel ray-length.
@@ -116,20 +127,38 @@ struct FHVPT_GridIterator
 
 FHVPT_GridIterator HVPT_CreateTopLevelIterator(float3 Origin, float3 Direction, float TMin, float TMax)
 {
-	// Initialize DDA state
-	float3 WorldRayBegin = Origin + Direction * TMin;
-	float3 WorldRayEnd = Origin + Direction * TMax;
-	float WorldRayTMax = length(WorldRayEnd - WorldRayBegin);
+	FHVPT_GridIterator Iterator = (FHVPT_GridIterator) 0;
 
-	// Transform to voxel-space
 	float3 WorldBoundsMin = HVPT_GetTranslatedWorldPos(HVPT_OrthoGrid.TopLevelGridWorldBoundsMin);
 	float3 WorldBoundsMax = HVPT_GetTranslatedWorldPos(HVPT_OrthoGrid.TopLevelGridWorldBoundsMax);
 	float3 TopLevelGridWorldBoundsExtent = WorldBoundsMax - WorldBoundsMin;
 
+	// Clip ray to where it intersects with the volume bounding box
+	float2 RayHitT = IntersectAABB(
+			Origin,
+			Direction,
+			TMin,
+			TMax,
+			WorldBoundsMin,
+			WorldBoundsMax
+		);
+	if (RayHitT.x >= RayHitT.y)
+	{
+		Iterator.InitInvalid();
+		return Iterator;
+	}
+	TMin = max(TMin, RayHitT.x);
+	TMax = min(TMax, RayHitT.y);
+
+	// Transform begin and end to voxel space
+	float3 WorldRayBegin = Origin + Direction * TMin;
+	float3 WorldRayEnd = Origin + Direction * TMax;
+	float WorldRayTMax = length(WorldRayEnd - WorldRayBegin);
+
 	float3 VoxelRayBegin = saturate((WorldRayBegin - WorldBoundsMin) / TopLevelGridWorldBoundsExtent) * ((float) HVPT_OrthoGrid.TopLevelGridResolution - 1e-3f);
 	float3 VoxelRayEnd   = saturate((WorldRayEnd   - WorldBoundsMin) / TopLevelGridWorldBoundsExtent) * ((float) HVPT_OrthoGrid.TopLevelGridResolution - 1e-3f);
 
-	FHVPT_GridIterator Iterator = (FHVPT_GridIterator)0;
+	// Initialize DDA state
 	Iterator.Init(VoxelRayBegin, VoxelRayEnd, WorldRayTMax);
 	return Iterator;
 }

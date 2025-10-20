@@ -130,9 +130,30 @@ FHVPT_Reservoir ComputeInitialSample(
 		OutReservoir = HVPT_CreateNewReservoir();
 		OutReservoir.M = 1;
 
-		// Perform tracking to get a distance into the volume
-		FHVPT_TrackingResult TrackingResult = HVPT_DeltaTracking(Ray, RandSequence);
-		bool bVolumeInteractionValid = TrackingResult.Distance != POSITIVE_INFINITY;
+		FHVPT_TrackingResult TrackingResult = (FHVPT_TrackingResult)0;
+		bool bVolumeInteractionValid = true;
+
+#if MULTIPLE_BOUNCES
+		// Check the ray that was generated intersects with the volume bounding box,
+		// and critically, clip the ray extent. Failing to clip the rays extent can cause TDR downstream
+		FVolumeIntersection VolIntersect = HVPT_Intersect(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
+		if (VolIntersect.HitVolume())
+		{
+			Ray.TMin = max(Ray.TMin, VolIntersect.VolumeTMin);
+			Ray.TMax = min(Ray.TMax, VolIntersect.VolumeTMax);
+#endif
+			// Perform tracking to get a distance into the volume
+			TrackingResult = HVPT_DeltaTracking(Ray, RandSequence);
+			bVolumeInteractionValid &= TrackingResult.Distance != POSITIVE_INFINITY;
+#if MULTIPLE_BOUNCES
+		}
+		else
+		{
+			// Unlikely (potentially impossible?) to hit
+			bVolumeInteractionValid = false;
+			TrackingResult.Distance = POSITIVE_INFINITY;
+		}
+#endif
 
 		// Add vertex to path
 		if (Bounce == 0)

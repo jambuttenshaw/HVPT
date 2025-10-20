@@ -122,7 +122,6 @@ float3 HVPT_TraceVisibilityRay(FRayDesc RayDesc, inout RandomSequence RandSequen
 
 	// Then perform volume tracking
 	FVolumeIntersection Intersection = HVPT_Intersect(RayDesc.Origin, RayDesc.Direction, RayDesc.TMin, RayDesc.TMax);
-	bool bEscaped = false;
 	if (Intersection.HitVolume())
 	{
 		FHVPT_MajorantSamplingContext SamplingContext = (FHVPT_MajorantSamplingContext)0;
@@ -130,18 +129,11 @@ float3 HVPT_TraceVisibilityRay(FRayDesc RayDesc, inout RandomSequence RandSequen
 			RayDesc.Origin, RayDesc.Direction, Intersection.VolumeTMin, Intersection.VolumeTMax,
 			RandomSequence_GenerateSample2D(RandSequence)
 		);
+		FHVPT_MajorantSample Sample = (FHVPT_MajorantSample)0;
+		
 		uint LoopGuard = 0;
-		while (LoopGuard++ < 128) // Until the ray escapes or there is no energy left in the path
+		while (SamplingContext.Sample(Sample) && LoopGuard++ < 128)
 		{
-			// Acquire a new sample from the volume
-			FHVPT_MajorantSample Sample = SamplingContext.Sample();
-			if (!Sample.IsValid())
-			{
-				// Escaped the volume
-				bEscaped = true;
-				break;
-			}
-
 			float3 WorldPosition = RayDesc.Origin + Sample.Distance * RayDesc.Direction;
 			FVolumeShadedResult Result = HVPT_GetDensity(WorldPosition);
 
@@ -171,10 +163,10 @@ float3 HVPT_TraceVisibilityRay(FRayDesc RayDesc, inout RandomSequence RandSequen
 			}
 		}
 		// Accumulate throughput from last sample point to exiting the volume
-		Throughput *= SamplingContext.MajorantTransmittance;
+		Throughput *= Sample.MajorantTransmittance;
 
 #if APPLY_VOLUMETRIC_FOG
-		if (bEscaped)
+		if (!Sample.IsValid()) // If escaped volume
 		{
 			// Accumulate transmittance due to global fog from exit point
 			RayDesc.TMin = Intersection.VolumeTMax;
@@ -276,79 +268,72 @@ bool HVPT_PathTracingKernel(inout FHVPT_PathState PathState, int Bounce)
 			PathState.Ray.Origin, PathState.Ray.Direction, VolumeIntersection.VolumeTMin, VolumeIntersection.VolumeTMax,
 			RandomSequence_GenerateSample2D(PathState.RandSequence)
 		);
+
+		FHVPT_MajorantSample Sample = (FHVPT_MajorantSample)0;
+		
 		uint LoopGuard = 0;
-		while (LoopGuard++ < 256)
+		while (SamplingContext.Sample(Sample) && LoopGuard++ < 256)
 		{
-			// Get next sample
-			FHVPT_MajorantSample Sample = SamplingContext.Sample();
-			if (Sample.IsValid())
+			// Get volume properties at point
+			float3 WorldPosition = PathState.Ray.Origin + Sample.Distance * PathState.Ray.Direction;
+			FVolumeShadedResult Result = HVPT_GetDensity(WorldPosition);
+
+			// Ensure that sigmaT is never above the majorant - this creates all sorts of weirdness
+			Result.SigmaT = min(Sample.SigmaMaj, Result.SigmaT);
+
+			float3 SigmaA = Result.SigmaT - Result.SigmaSHG;
+			float3 Albedo = saturate(Result.SigmaSHG / Result.SigmaT);
+
+			// Accumulate emission
+			if (any(Result.Emission > 0.0f))
 			{
-				// Get volume properties at point
-				float3 WorldPosition = PathState.Ray.Origin + Sample.Distance * PathState.Ray.Direction;
-				FVolumeShadedResult Result = HVPT_GetDensity(WorldPosition);
+				PathState.Radiance += PathState.PathThroughput * /*(1.0f - Albedo) * */Result.Emission;
+			}
 
-				// Ensure that sigmaT is never above the majorant - this creates all sorts of weirdness
-				Result.SigmaT = min(Sample.SigmaMaj, Result.SigmaT);
+			// Decide on scattering type
+			float AbsorptionProbability = Max(SigmaA) / Max(Sample.SigmaMaj);
+			float ScatteringProbability = Max(Result.SigmaSHG) / Max(Sample.SigmaMaj);
+			float NullProbability = max(0.0f, 1.0f - AbsorptionProbability - ScatteringProbability);
 
-				float3 SigmaA = Result.SigmaT - Result.SigmaSHG;
-				float3 Albedo = saturate(Result.SigmaSHG / Result.SigmaT);
+			// Rescale probabilities to be (0,1]
+			float ProbabilitiesSum = AbsorptionProbability + ScatteringProbability + NullProbability;
+			float Absorption_CMF = saturate(AbsorptionProbability / ProbabilitiesSum);
+			float Scattering_CMF = Absorption_CMF + saturate(ScatteringProbability / ProbabilitiesSum);
 
-				// Accumulate emission
-				if (any(Result.Emission > 0.0f))
+			float u = RandomSequence_GenerateSample1D(PathState.RandSequence);
+
+			if (u <= Scattering_CMF)
+			{
+				if (bLastBounce || u <= Absorption_CMF || !any(PathState.PathThroughput > 0))
 				{
-					PathState.Radiance += PathState.PathThroughput * /*(1.0f - Albedo) * */Result.Emission;
-				}
-
-				// Decide on scattering type
-				float AbsorptionProbability = Max(SigmaA) / Max(Sample.SigmaMaj);
-				float ScatteringProbability = Max(Result.SigmaSHG) / Max(Sample.SigmaMaj);
-				float NullProbability = max(0.0f, 1.0f - AbsorptionProbability - ScatteringProbability);
-
-				// Rescale probabilities to be (0,1]
-				float ProbabilitiesSum = AbsorptionProbability + ScatteringProbability + NullProbability;
-				float Absorption_CMF = saturate(AbsorptionProbability / ProbabilitiesSum);
-				float Scattering_CMF = Absorption_CMF + saturate(ScatteringProbability / ProbabilitiesSum);
-
-				float u = RandomSequence_GenerateSample1D(PathState.RandSequence);
-
-				if (u <= Scattering_CMF)
-				{
-					if (bLastBounce || u <= Absorption_CMF || !any(PathState.PathThroughput > 0))
-					{
-						bTerminated = true;
-						break;
-					}
-
-					PathState.PathThroughput *= Albedo;
-
-					// Sample direct lighting at this vertex
-					PathState.Radiance += PathState.PathThroughput * HVPT_DirectLight_Medium(Result.PhaseG, WorldPosition, PathState.Ray.Direction, PathState.RandSequence);
-
-					// Sample phase function for new scattering direction
-					float4 DirectionAndPDF = ImportanceSampleHenyeyGreensteinPhase(RandomSequence_GenerateSample2D(PathState.RandSequence), Result.PhaseG);
-					float3 Direction = TangentToWorld(DirectionAndPDF.xyz, PathState.Ray.Direction);
-					float PhasePDF = DirectionAndPDF.w;
-
-					if (PhasePDF == 0.0f)
-					{
-						// No continuation is possible
-						bTerminated = true;
-						break;
-					}
-
-					// Update ray state for scattering
-					PathState.Ray.Origin = WorldPosition;
-					PathState.Ray.Direction = Direction;
-					PathState.Ray.TMin = 0.0f;
-					PathState.Ray.TMax = POSITIVE_INFINITY;
-
-					bScattered = true;
+					bTerminated = true;
 					break;
 				}
-			}
-			else
-			{
-				// Exited volume
+
+				PathState.PathThroughput *= Albedo;
+
+				// Sample direct lighting at this vertex
+				PathState.Radiance += PathState.PathThroughput * HVPT_DirectLight_Medium(Result.PhaseG, WorldPosition, PathState.Ray.Direction, PathState.RandSequence);
+
+				// Sample phase function for new scattering direction
+				float4 DirectionAndPDF = ImportanceSampleHenyeyGreensteinPhase(RandomSequence_GenerateSample2D(PathState.RandSequence), Result.PhaseG);
+				float3 Direction = TangentToWorld(DirectionAndPDF.xyz, PathState.Ray.Direction);
+				float PhasePDF = DirectionAndPDF.w;
+
+				if (PhasePDF == 0.0f)
+				{
+					// No continuation is possible
+					bTerminated = true;
+					break;
+				}
+
+				// Update ray state for scattering
+				PathState.Ray.Origin = WorldPosition;
+				PathState.Ray.Direction = Direction;
+				PathState.Ray.TMin = 0.0f;
+				PathState.Ray.TMax = POSITIVE_INFINITY;
+
+				bScattered = true;
 				break;
 			}
 		}
