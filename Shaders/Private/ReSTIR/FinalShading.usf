@@ -62,9 +62,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRFinalShadingRGS)
 		Radiance *= W;
 	}
 
-	if ((isnan(Radiance.r) || isinf(Radiance.r)) ||
-        (isnan(Radiance.g) || isinf(Radiance.g)) ||
-        (isnan(Radiance.b) || isinf(Radiance.b)))
+	if (any(or(isnan(Radiance.r), isinf(Radiance.r))))
 	{
 		Radiance = 0.0f;
 	}

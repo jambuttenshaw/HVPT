@@ -46,9 +46,9 @@ float3 HVPT_CalculateTransmittance(FRayDesc Ray, inout RandomSequence RandSequen
 	switch (ShadingQuality)
 	{
 	case SHADING_QUALITY_CANDIDATE_GENERATION:
-		return HVPT_TopLevelDDATransmittance(Ray);
 	case SHADING_QUALITY_TEMPORAL_REUSE:
 	case SHADING_QUALITY_SPATIAL_REUSE:
+		return HVPT_TopLevelDDATransmittance(Ray);
 	case SHADING_QUALITY_FINAL_SHADING:
 		return HVPT_DDATransmittance(Ray);
 	}
