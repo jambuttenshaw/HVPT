@@ -132,7 +132,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 #if MULTIPLE_BOUNCES
 				LoadExtraBounces(Tap.GetSampledPixel(), Tap.GetNumExtraBounces(), Bounces);
 #endif
-				HVPT_ResampleNeighbour(Tap, 
+				HVPT_ResampleNeighbour<SHADING_QUALITY_SPATIAL_REUSE>(Tap, 
 #if MULTIPLE_BOUNCES
 					Bounces, 
 #endif
@@ -181,7 +181,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 						if (i == 0) LoadExtraBounces(Tap.GetSampledPixel(), Tap.GetNumExtraBounces(), Bounces);
 #endif
 
-						float P_y = Luminance(HVPT_EvaluateF<SHADING_QUALITY_CANDIDATE_GENERATION>(Tap,
+						float P_y = Luminance(HVPT_EvaluateF<SHADING_QUALITY_SPATIAL_REUSE>(Tap,
 #if MULTIPLE_BOUNCES
 							Bounces,
 #endif

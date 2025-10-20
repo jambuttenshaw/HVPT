@@ -4,6 +4,7 @@
 #include "ReSTIRUtils.ush"
 #include "PathEvaluation.ush"
 
+template <SHADING_QUALITY ShadingQuality>
 void HVPT_ResampleNeighbour(
 	inout FHVPT_Reservoir Tap,
 #if MULTIPLE_BOUNCES
@@ -15,7 +16,7 @@ void HVPT_ResampleNeighbour(
 	if (Tap.RunningSum == 0.0f)
 		return;
 
-	float P_y_hat = Luminance(HVPT_EvaluateF<SHADING_QUALITY_CANDIDATE_GENERATION>(Tap,
+	float P_y_hat = Luminance(HVPT_EvaluateF<ShadingQuality>(Tap,
 #if MULTIPLE_BOUNCES
 			Bounces,
 #endif

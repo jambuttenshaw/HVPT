@@ -208,7 +208,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 #if MULTIPLE_BOUNCES
 				LoadExtraBounces<false>(ReprojectedReservoirIndex, Taps[i].GetNumExtraBounces(), Bounces);
 #endif
-				HVPT_ResampleNeighbour(Taps[i], 
+				HVPT_ResampleNeighbour<SHADING_QUALITY_TEMPORAL_REUSE>(Taps[i], 
 #if MULTIPLE_BOUNCES
 					Bounces,
 #endif
@@ -273,7 +273,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 					}
 #endif
 
-					float P_y = Luminance(HVPT_EvaluateF<SHADING_QUALITY_CANDIDATE_GENERATION>(Taps[i],
+					float P_y = Luminance(HVPT_EvaluateF<SHADING_QUALITY_TEMPORAL_REUSE>(Taps[i],
 #if MULTIPLE_BOUNCES
 						Bounces,
 #endif
