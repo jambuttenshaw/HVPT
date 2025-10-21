@@ -13,10 +13,6 @@
 #define MULTIPLE_BOUNCES true
 #endif
 
-#ifndef ENABLE_TALBOT_MIS
-#define ENABLE_TALBOT_MIS true
-#endif
-
 
 Texture2D<float> SceneDepthTexture;
 Texture2D<float4> GBufferVelocityTexture;
@@ -34,6 +30,7 @@ RWStructuredBuffer<FHVPT_Bounce> RWCurrentExtraBounces;
 
 float TemporalHistoryThreshold;
 uint bEnableTemporalReprojection;
+uint bTalbotMIS;
 
 // Debug tools
 uint DebugFlags;
@@ -242,9 +239,8 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 			Taps[i].RunningSum = 0.0f;
 		}
 
-#if ENABLE_TALBOT_MIS
 		// Calculate MIS weight
-		if (Taps[i].RunningSum > 0.0f)
+		if (bTalbotMIS && Taps[i].RunningSum > 0.0f)
 		{
 			float PSum = 0.0f;
 			float PQi = 0.0f;
@@ -311,7 +307,6 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 
 			MISWeight = PSum > 0.0f ? PQi * K / PSum : 0.0f;
 		}
-#endif
 
 		Taps[i].RunningSum *= MISWeight;
 

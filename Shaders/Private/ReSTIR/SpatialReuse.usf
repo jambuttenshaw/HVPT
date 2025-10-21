@@ -17,10 +17,6 @@
 #define MAX_SPATIAL_SAMPLES 8
 #endif
 
-#ifndef ENABLE_TALBOT_MIS
-#define ENABLE_TALBOT_MIS true
-#endif
-
 
 Texture2D<float> SceneDepthTexture;
 
@@ -28,6 +24,7 @@ uint TemporalSeed;
 
 uint NumSpatialSamples;
 float SpatialReuseRadius;
+uint bTalbotMIS;
 
 Texture2D<float2> FeatureTexture;
 
@@ -139,8 +136,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 					CanonicalRay, RandSequence);
 			}
 
-#if ENABLE_TALBOT_MIS
-			if (Tap.RunningSum > 0.0f)
+			if (bTalbotMIS && Tap.RunningSum > 0.0f)
 			{
 				float PSum = 0.0f;
 				float PQi = 0.0f;
@@ -197,7 +193,6 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 
 				MISWeight = PSum > 0.0f ? PQi * K / PSum : 0.0f;
 			}
-#endif
 
 			Tap.RunningSum *= MISWeight;
 			(void)HVPT_SimpleResampleStep<false>(Tap, OutReservoir, RandomSequence_GenerateSample1D(RandSequence));

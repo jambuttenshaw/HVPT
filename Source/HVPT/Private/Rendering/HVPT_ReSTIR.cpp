@@ -63,8 +63,13 @@ public:
 	class FMultipleBounces : SHADER_PERMUTATION_BOOL("MULTIPLE_BOUNCES");
 	class FUseSurfaceContributions : SHADER_PERMUTATION_BOOL("USE_SURFACE_CONTRIBUTIONS");
 	class FApplyVolumetricFog : SHADER_PERMUTATION_BOOL("APPLY_VOLUMETRIC_FOG");
+	class FUseSER : SHADER_PERMUTATION_BOOL("USE_SER");
 	class FDebugOutputEnabled : SHADER_PERMUTATION_BOOL("DEBUG_OUTPUT_ENABLED");
-	using FPermutationDomain = TShaderPermutationDomain<FMultipleBounces, FUseSurfaceContributions, FApplyVolumetricFog, FDebugOutputEnabled>;
+	using FPermutationDomain = TShaderPermutationDomain<FMultipleBounces,
+														FUseSurfaceContributions,
+														FApplyVolumetricFog,
+														FUseSER,
+														FDebugOutputEnabled>;
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
@@ -121,14 +126,6 @@ public:
 	DECLARE_GLOBAL_SHADER(FReSTIRTemporalReuseRGS);
 	SHADER_USE_ROOT_PARAMETER_STRUCT(FReSTIRTemporalReuseRGS, FReSTIRBaseRGS);
 
-	class FTalbotMIS : SHADER_PERMUTATION_BOOL("ENABLE_TALBOT_MIS");
-	using FPermutationDomain = TShaderPermutationDomain<
-		FTalbotMIS,
-		FMultipleBounces,
-		FUseSurfaceContributions,
-		FApplyVolumetricFog,
-		FDebugOutputEnabled>;
-
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
 
@@ -143,6 +140,7 @@ public:
 
 		SHADER_PARAMETER(float, TemporalHistoryThreshold)
 		SHADER_PARAMETER(uint32, bEnableTemporalReprojection)
+		SHADER_PARAMETER(uint32, bTalbotMIS)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -154,19 +152,8 @@ public:
 	DECLARE_GLOBAL_SHADER(FReSTIRSpatialReuseRGS);
 	SHADER_USE_ROOT_PARAMETER_STRUCT(FReSTIRSpatialReuseRGS, FReSTIRBaseRGS);
 
-	class FTalbotMIS : SHADER_PERMUTATION_BOOL("ENABLE_TALBOT_MIS");
-	using FPermutationDomain = TShaderPermutationDomain<
-		FTalbotMIS,
-		FMultipleBounces,
-		FUseSurfaceContributions,
-		FApplyVolumetricFog,
-		FDebugOutputEnabled>;
-
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
-
-		SHADER_PARAMETER(uint32, NumSpatialSamples)
-		SHADER_PARAMETER(float, SpatialReuseRadius)
 
 		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float2>, FeatureTexture)
 
@@ -175,6 +162,10 @@ public:
 
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Reservoir>, RWOutReservoirs)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Bounce>, RWOutExtraBounces)
+
+		SHADER_PARAMETER(uint32, NumSpatialSamples)
+		SHADER_PARAMETER(float, SpatialReuseRadius)
+		SHADER_PARAMETER(uint32, bTalbotMIS)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -241,21 +232,14 @@ void HVPT::PrepareRaytracingShadersReSTIR(const FViewInfo& View, const FHVPTView
 		Permutation.Set<typename T::FUseSurfaceContributions>(HVPT::UseSurfaceContributions());
 		Permutation.Set<typename T::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
 		Permutation.Set<typename T::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
+		Permutation.Set<typename T::FUseSER>(false);
 		OutRayGenShaders.Add(ShaderMap->GetShader<T>(Permutation).GetRayTracingShader());
 	};
 
 	// AddShader<T>() does not compile
 	AddShader.template operator()<FReSTIRCandidateGenerationRGS>();
-	{
-		FReSTIRTemporalReuseRGS::FPermutationDomain Permutation;
-		Permutation.Set<FReSTIRTemporalReuseRGS::FTalbotMIS>(HVPT::GetTemporalReuseMISEnabled());
-		AddShader.template operator()<FReSTIRTemporalReuseRGS>(Permutation);
-	}
-	{
-		FReSTIRSpatialReuseRGS::FPermutationDomain Permutation;
-		Permutation.Set<FReSTIRSpatialReuseRGS::FTalbotMIS>(HVPT::GetSpatialReuseMISEnabled());
-		AddShader.template operator()<FReSTIRSpatialReuseRGS>(Permutation);
-	}
+	AddShader.template operator()<FReSTIRTemporalReuseRGS>();
+	AddShader.template operator()<FReSTIRSpatialReuseRGS>();
 	AddShader.template operator()<FReSTIRFinalShadingRGS>();
 }
 
@@ -290,6 +274,7 @@ void AddRaytracingPass(
 	Permutation.Set<typename Shader::FMultipleBounces>(HVPT::GetMaxBounces() > 1);
 	Permutation.Set<typename Shader::FUseSurfaceContributions>(HVPT::UseSurfaceContributions());
 	Permutation.Set<typename Shader::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
+	Permutation.Set<typename Shader::FUseSER>(false);
 	Permutation.Set<typename Shader::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 	TShaderMapRef<Shader> RayGenShader(ViewInfo.ShaderMap, Permutation);
 
@@ -455,16 +440,14 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 		PassParameters->TemporalHistoryThreshold = HVPT::GetTemporalReuseHistoryThreshold();
 		PassParameters->bEnableTemporalReprojection = HVPT::GetTemporalReprojectionEnabled() && bHasTemporalFeatureTexture;
+		PassParameters->bTalbotMIS = HVPT::GetTemporalReuseMISEnabled();
 
-		FReSTIRTemporalReuseRGS::FPermutationDomain Permutation;
-		Permutation.Set<FReSTIRTemporalReuseRGS::FTalbotMIS>(HVPT::GetTemporalReuseMISEnabled());
 		AddRaytracingPass<FReSTIRTemporalReuseRGS>(
 			GraphBuilder,
 			RDG_EVENT_NAME("ReSTIRTemporalReuse"),
 			ViewInfo,
 			State,
-			PassParameters,
-			Permutation
+			PassParameters
 		);
 	}
 
@@ -476,9 +459,6 @@ void HVPT::RenderWithReSTIRPathTracing(
 		FReSTIRSpatialReuseRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRSpatialReuseRGS::FParameters>();
 		PopulateCommonParameters(&PassParameters->Common, 2);
 
-		PassParameters->NumSpatialSamples = FMath::Clamp(HVPT::GetNumSpatialReuseSamples(), 0, kReSTIRMaxSpatialSamples);
-		PassParameters->SpatialReuseRadius = HVPT::GetSpatialReuseRadius();
-
 		PassParameters->FeatureTexture = GraphBuilder.CreateSRV(State.FeatureTexture);
 
 		PassParameters->InReservoirs = GraphBuilder.CreateSRV(ReservoirsA);
@@ -486,16 +466,17 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 		PassParameters->RWOutReservoirs = GraphBuilder.CreateUAV(ReservoirsB);
 		PassParameters->RWOutExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesB);
-		
-		FReSTIRSpatialReuseRGS::FPermutationDomain Permutation;
-		Permutation.Set<FReSTIRSpatialReuseRGS::FTalbotMIS>(HVPT::GetSpatialReuseMISEnabled());
+
+		PassParameters->NumSpatialSamples = FMath::Clamp(HVPT::GetNumSpatialReuseSamples(), 0, kReSTIRMaxSpatialSamples);
+		PassParameters->SpatialReuseRadius = HVPT::GetSpatialReuseRadius();
+		PassParameters->bTalbotMIS = HVPT::GetSpatialReuseMISEnabled();
+
 		AddRaytracingPass<FReSTIRSpatialReuseRGS>(
 			GraphBuilder,
 			RDG_EVENT_NAME("ReSTIRSpatialReuse"),
 			ViewInfo,
 			State,
-			PassParameters,
-			Permutation
+			PassParameters
 		);
 	}
 	else
