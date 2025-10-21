@@ -282,7 +282,7 @@ void PathTracingBuildLightGridCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	}
 	// figure out dimension of the 3d grid and the current ID to be filled
 	uint3 VoxelId = 0, VoxelRes = 1;
-	int Axis = DispatchThreadId.z;
+	uint Axis = DispatchThreadId.z;
 	if (LightGridAxis != Axis && LightGridAxis < 3)
 	{
 		RWLightGrid[DispatchThreadId] = 0;

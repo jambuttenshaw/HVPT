@@ -27,7 +27,7 @@ class FHVPT_PathTracingSkylightPrepareCS : public FGlobalShader
 	DECLARE_GLOBAL_SHADER(FHVPT_PathTracingSkylightPrepareCS)
 	SHADER_USE_PARAMETER_STRUCT(FHVPT_PathTracingSkylightPrepareCS, FGlobalShader)
 
-		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
 		// NOTE: skylight code is shared with RT passes
 		return ShouldCompileRayTracingShadersForProject(Parameters.Platform);
@@ -60,7 +60,12 @@ class FHVPT_PathTracingBuildLightGridCS : public FGlobalShader
 	DECLARE_GLOBAL_SHADER(FHVPT_PathTracingBuildLightGridCS)
 	SHADER_USE_PARAMETER_STRUCT(FHVPT_PathTracingBuildLightGridCS, FGlobalShader)
 
-		static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return IsFeatureLevelSupported(Parameters.Platform, ERHIFeatureLevel::SM6);
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
 	{
 		// Required intersection utils didn't exist in 5.5, so we will define them ourselves
 		// In more recent engine versions switch back to built in functions
