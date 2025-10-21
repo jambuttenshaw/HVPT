@@ -57,7 +57,7 @@ struct FHVPT_MajorantSamplingContext
 
 		RayOriginToSegmentDistance = InVolumeTMin;
 
-		CurrentSegmentT = POSITIVE_INFINITY;
+		CurrentSegmentT = 0.0f;
 		SigmaMaj = 0.0f;
 
 		RandSequence.SampleIndex = asuint(RandSample.x);

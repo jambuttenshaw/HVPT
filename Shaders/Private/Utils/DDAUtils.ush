@@ -13,12 +13,14 @@
 // - it will not suffer from floating point precision errors that GetVoxelEntry/Exit will!
 struct FHVPT_GridIterator
 {
+	int3 GridResolution;
+
 	int3 CurrentVoxelPos; // Current index in the voxel grid
 	int3 NextVoxelPos; // Next index in the voxel grid (to make DDA easy to use, both next and current are stored. In future this could be re-arranged)
-	float RayMarchT; // Current T
+	float RayMarchT_VoxelSpace; // Current T
 
-	float DeltaT; // Step size through the current voxel
-	float TMax; // End T
+	float DeltaT_VoxelSpace; // Step size through the current voxel
+	float TMax_VoxelSpace; // End T
 
 	float3 Direction;
 	float3 DeltaStep; // Distance to move along each axis - equal to abs(1 / Direction)
@@ -27,64 +29,56 @@ struct FHVPT_GridIterator
 
 	float DistanceScale; // Scale factor for distances out of voxel space
 
-	float3 VoxelSpaceBegin; // For calculating points along the ray without accumulating floating point error
+	float3 Begin_VoxelSpace; // For calculating points along the ray without accumulating floating point error
 
 	// Note: It is expected VoxelSpace Begin and End will be inside/on boundary of the grid!
 	// WorldSpace_TMax is required to compute a scaling factor for distance values
-	void Init(float3 VoxelSpace_Begin, float3 VoxelSpace_End, float WorldSpace_TMax)
+	void Init(float3 VoxelSpace_Begin, float3 VoxelSpace_End, float WorldSpace_TMax, int3 InGridResolution)
 	{
-		VoxelSpaceBegin = VoxelSpace_Begin;
+		GridResolution = InGridResolution;
+
+		Begin_VoxelSpace = VoxelSpace_Begin;
 		Direction = VoxelSpace_End - VoxelSpace_Begin;
 
-		RayMarchT = 0.0f;
-		TMax = length(Direction);
-		if (isinf(TMax) || isnan(TMax))
-			TMax = 0.0f;
+		RayMarchT_VoxelSpace = 0.0f;
+		TMax_VoxelSpace = length(Direction);
+		if (isinf(TMax_VoxelSpace) || isnan(TMax_VoxelSpace))
+			TMax_VoxelSpace = 0.0f;
 
-		DistanceScale = TMax > 0.0f ? WorldSpace_TMax / TMax : 0.0f;
+		DistanceScale = TMax_VoxelSpace > 0.0f ? WorldSpace_TMax / TMax_VoxelSpace : 0.0f;
 
-		Direction /= TMax;
+		Direction /= TMax_VoxelSpace;
 		DeltaStep = select(Direction == 0.0f, POSITIVE_INFINITY, abs(1.0f / Direction));
 
-		float3 VoxelBoundsPos = select(sign(Direction) > 0, floor(VoxelSpaceBegin) + 1, ceil(VoxelSpaceBegin) - 1);
-		BoundsHitT = abs((VoxelBoundsPos - VoxelSpaceBegin) * DeltaStep);
+		float3 VoxelBoundsPos = select(sign(Direction) > 0, floor(Begin_VoxelSpace) + 1, ceil(Begin_VoxelSpace) - 1);
+		BoundsHitT = abs((VoxelBoundsPos - Begin_VoxelSpace) * DeltaStep);
 
-		DeltaT = 0.0f;
-		NextVoxelPos = floor(VoxelSpaceBegin);
+		DeltaT_VoxelSpace = 0.0f;
+		NextVoxelPos = floor(Begin_VoxelSpace);
 		CurrentVoxelPos = NextVoxelPos;
-	}
-
-	// Creates an invalid iterator where calling Next() will always return false
-	void InitInvalid()
-	{
-		DeltaT = FLOAT_MAX;
-		TMax = 0.0f;
 	}
 
 	bool Next()
 	{
-		if (DeltaT + RayMarchT >= TMax)
+		if (DeltaT_VoxelSpace + RayMarchT_VoxelSpace >= TMax_VoxelSpace || any(NextVoxelPos < 0) || any(NextVoxelPos >= GridResolution))
 		{
-			DeltaT = 0.0f;
+			DeltaT_VoxelSpace = 0.0f;
 			return false;
 		}
 
 		CurrentVoxelPos = NextVoxelPos;
-		RayMarchT += DeltaT;
+		RayMarchT_VoxelSpace += DeltaT_VoxelSpace;
 
 		// Select axis that will cross a voxel boundary next
 		float MinComponent = min3(BoundsHitT.x, BoundsHitT.y, BoundsHitT.z);
 		uint3 Axis = BoundsHitT == MinComponent;
 
-		DeltaT = MinComponent - RayMarchT;
+		DeltaT_VoxelSpace = MinComponent - RayMarchT_VoxelSpace;
 		BoundsHitT += Axis * DeltaStep;
 		NextVoxelPos += Axis * sign(Direction);
 
 		// Clip voxel delta-t by overall voxel ray-length.
-		if (RayMarchT + DeltaT > TMax)
-		{
-			DeltaT = TMax - RayMarchT;
-		}
+		DeltaT_VoxelSpace = min(DeltaT_VoxelSpace, TMax_VoxelSpace - RayMarchT_VoxelSpace);
 
 		return true;
 	}
@@ -95,18 +89,21 @@ struct FHVPT_GridIterator
 		return (uint3)CurrentVoxelPos;
 	}
 
+	// Entry point of voxel in voxel space
 	float3 GetVoxelEntry()
 	{
 		// Offset ensures entry point is always inside voxel
-		return VoxelSpaceBegin + (RayMarchT + 1e-4f) * Direction;
+		return Begin_VoxelSpace + (RayMarchT_VoxelSpace + 1e-4f) * Direction;
 	}
 
+	// Exit point from voxel in voxel space
 	float3 GetVoxelExit()
 	{
 		// Offset ensures exit point is always inside voxel
-		return VoxelSpaceBegin + (RayMarchT + DeltaT - 1e-4f) * Direction;
+		return Begin_VoxelSpace + (RayMarchT_VoxelSpace + DeltaT_VoxelSpace - 1e-4f) * Direction;
 	}
 
+	// Midpoint of ray through voxel in voxel space
 	float3 GetVoxelMidpoint()
 	{
 		// If DeltaT is distance through voxel, then half of DeltaT is distance to middle of voxel
@@ -115,7 +112,7 @@ struct FHVPT_GridIterator
 
 	float GetWorldDeltaT()
 	{
-		return DeltaT * DistanceScale;
+		return DeltaT_VoxelSpace * DistanceScale;
 	}
 
 	float GetDistanceScale()
@@ -144,7 +141,7 @@ FHVPT_GridIterator HVPT_CreateTopLevelIterator(float3 Origin, float3 Direction, 
 		);
 	if (RayHitT.x >= RayHitT.y)
 	{
-		Iterator.InitInvalid();
+		// Will be 0 initialized: DeltaT will always be 0, and Next() will always return false
 		return Iterator;
 	}
 	TMin = max(TMin, RayHitT.x);
@@ -159,7 +156,7 @@ FHVPT_GridIterator HVPT_CreateTopLevelIterator(float3 Origin, float3 Direction, 
 	float3 VoxelRayEnd   = saturate((WorldRayEnd   - WorldBoundsMin) / TopLevelGridWorldBoundsExtent) * ((float) HVPT_OrthoGrid.TopLevelGridResolution - 1e-3f);
 
 	// Initialize DDA state
-	Iterator.Init(VoxelRayBegin, VoxelRayEnd, WorldRayTMax);
+	Iterator.Init(VoxelRayBegin, VoxelRayEnd, WorldRayTMax, HVPT_OrthoGrid.TopLevelGridResolution);
 	return Iterator;
 }
 
@@ -169,7 +166,7 @@ FHVPT_GridIterator HVPT_CreateBottomLevelIterator(float3 TopLevelVoxelEntry, flo
 	float3 BottomLevelRayEnd = frac(TopLevelVoxelExit) * BottomLevelVoxelResolution;
 
 	FHVPT_GridIterator Iterator = (FHVPT_GridIterator)0;
-	Iterator.Init(BottomLevelRayBegin, BottomLevelRayEnd, length(TopLevelVoxelExit - TopLevelVoxelEntry) * TopLevelVoxelToWorldScale);
+	Iterator.Init(BottomLevelRayBegin, BottomLevelRayEnd, length(TopLevelVoxelExit - TopLevelVoxelEntry) * TopLevelVoxelToWorldScale, BottomLevelVoxelResolution);
 	return Iterator;
 }
 
