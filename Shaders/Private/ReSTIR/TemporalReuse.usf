@@ -82,6 +82,31 @@ float3 ComputePreviousFrameRayDirection(uint2 Pixel)
 	return normalize(TranslatedWorldPosition.xyz - View.PrevTranslatedWorldCameraOrigin.xyz);
 }
 
+float3 GetHistoryScreenPosition(float2 ScreenPosition, float DeviceZ, float ReprojectDeviceZ, float4 EncodedVelocity)
+{
+	float3 HistoryScreenPosition = float3(ScreenPosition, ReprojectDeviceZ);
+	bool bIsDynamicPixel = false;
+
+	{
+		float4 ThisClip = float4(HistoryScreenPosition, 1);
+		float4 PrevClip = mul(ThisClip, View.ClipToPrevClip); //<=== doesn't contain AA offsets
+		
+		float3 PrevScreen = PrevClip.xyz / PrevClip.w;
+		float3 Velocity = HistoryScreenPosition - PrevScreen;
+		bIsDynamicPixel = EncodedVelocity.x > 0.0;
+
+		if (bIsDynamicPixel)
+		{
+			float4 ReferencePrevClip = mul(float4(ScreenPosition, DeviceZ, 1), View.ClipToPrevClip);
+			Velocity += DecodeVelocityFromTexture(EncodedVelocity) - (float3(ScreenPosition, DeviceZ) - ReferencePrevClip.xyz / ReferencePrevClip.w);
+		}
+
+		HistoryScreenPosition -= Velocity;
+	}
+
+	return HistoryScreenPosition;
+}
+
 
 RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 {
@@ -120,18 +145,13 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 		// If successfully have sample
 		if (ReprojectionDepth != POSITIVE_INFINITY)
 		{
-			float3 WorldPos = CanonicalRay.Origin + ReprojectionDepth * CanonicalRay.Direction;
+			float2 ScreenPos = float2(PixelCoord) + HVPT_GetSubpixelJitter();
+			float2 ScreenUV = ScreenPos * View.ViewSizeAndInvSize.zw;
+			ScreenPos = float2(2.0f * ScreenUV.x - 1, 1 - 2.0f * ScreenUV.y);
+			float DeviceZ = ConvertToDeviceZ(ReprojectionDepth);
 
-			// Find previous frame world position if we have velocity data
-			float3 Velocity = HVPT_GetVelocity(WorldPos);
-			WorldPos -= Velocity;
+			ScreenPos = GetHistoryScreenPosition(ScreenPos, DeviceZ, DeviceZ, GBufferVelocityTexture[PixelCoord]).xy;
 
-			float3 CameraVelocity = (View.WorldViewOriginHigh + View.WorldViewOriginLow) - (View.PrevWorldViewOriginHigh + View.PrevWorldViewOriginLow);
-			WorldPos -= CameraVelocity;
-
-			float4 ClipPos = mul(float4(WorldPos, 1), View.PrevTranslatedWorldToClip);
-
-			float2 ScreenPos = ClipPos.xy / ClipPos.w;
 			ScreenPos.x = 0.5 * ScreenPos.x + 0.5;
 			ScreenPos.y = -0.5 * ScreenPos.y + 0.5;
 			ScreenPos *= View.ViewSizeAndInvSize.xy;
