@@ -100,6 +100,8 @@ namespace HVPT
 	HVPT_API bool ShouldRenderHVPTForView(const FViewInfo& View);
 	HVPT_API bool ShouldRenderMeshBatchWithHVPT(const FMeshBatch* Mesh, const FPrimitiveSceneProxy* Proxy, ERHIFeatureLevel::Type FeatureLevel);
 
+	HVPT_API bool ShouldUseSER();
+
 	// Extended heterogeneous volume interface
 
 	// Use templates below externally

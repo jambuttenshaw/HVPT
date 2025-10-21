@@ -290,6 +290,14 @@ static TAutoConsoleVariable<int32> CVarHVPTOrthoGridMaxMemory(
 );
 
 
+static TAutoConsoleVariable<bool> CVarHVPTUseSER(
+	TEXT("r.HVPT.SER"),
+	false,
+	TEXT("Enables SER if available on the current platform."),
+	ECVF_RenderThreadSafe
+);
+
+
 static TAutoConsoleVariable<bool> CVarHVPTFreezeTemporalSeed(
 	TEXT("r.HVPT.FreezeTemporalSeed"),
 	false,
@@ -601,6 +609,12 @@ namespace HVPT
 		return HVPT::UseHVPT_RenderThread()
 			&& Proxy->IsHeterogeneousVolume()
 			&& DoesMaterialShaderSupportHVPT(Material);
+	}
+
+
+	bool ShouldUseSER()
+	{
+		return GRHIGlobals.SupportsShaderExecutionReordering && CVarHVPTUseSER.GetValueOnRenderThread();
 	}
 
 

@@ -232,7 +232,7 @@ void HVPT::PrepareRaytracingShadersReSTIR(const FViewInfo& View, const FHVPTView
 		Permutation.Set<typename T::FUseSurfaceContributions>(HVPT::UseSurfaceContributions());
 		Permutation.Set<typename T::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
 		Permutation.Set<typename T::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
-		Permutation.Set<typename T::FUseSER>(false);
+		Permutation.Set<typename T::FUseSER>(HVPT::ShouldUseSER());
 		OutRayGenShaders.Add(ShaderMap->GetShader<T>(Permutation).GetRayTracingShader());
 	};
 
@@ -274,7 +274,7 @@ void AddRaytracingPass(
 	Permutation.Set<typename Shader::FMultipleBounces>(HVPT::GetMaxBounces() > 1);
 	Permutation.Set<typename Shader::FUseSurfaceContributions>(HVPT::UseSurfaceContributions());
 	Permutation.Set<typename Shader::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
-	Permutation.Set<typename Shader::FUseSER>(false);
+	Permutation.Set<typename Shader::FUseSER>(HVPT::ShouldUseSER());
 	Permutation.Set<typename Shader::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 	TShaderMapRef<Shader> RayGenShader(ViewInfo.ShaderMap, Permutation);
 

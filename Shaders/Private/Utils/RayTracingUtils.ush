@@ -3,6 +3,55 @@
 
 #include "/Engine/Private/RayTracing/RayTracingCommon.ush"
 
+#if USE_SER
+#include "/Engine/Private/RayTracing/HitObjectSupport.ush"
+#endif
+
+
+void HVPT_TraceVisibilityRayPacked(
+	inout FPackedMaterialClosestHitPayload PackedPayload,
+	RaytracingAccelerationStructure TLAS,
+	uint RayFlags,
+	uint InstanceInclusionMask,
+	FRayDesc Ray)
+{
+	const uint RayContributionToHitGroupIndex = RAY_TRACING_SHADER_SLOT_SHADOW;
+	const uint MultiplierForGeometryContributionToShaderIndex = RAY_TRACING_NUM_SHADER_SLOTS;
+	const uint MissShaderIndex = 0;
+
+	// By enabling minimal payload mode all other payload information is ignored, meaning these functions need no payload inputs
+	PackedPayload.SetMinimalPayloadMode();
+	PackedPayload.HitT = 0;
+
+	// Trace the ray
+#if USE_SER
+	{
+		NvHitObject Hit;
+		NvTraceRayHitObject(
+			TLAS,
+			RayFlags,
+			InstanceInclusionMask,
+			RayContributionToHitGroupIndex,
+			MultiplierForGeometryContributionToShaderIndex,
+			MissShaderIndex,
+			Ray.GetNativeDesc(),
+			PackedPayload,
+			Hit);
+		NvReorderThread(Hit);
+		NvInvokeHitObject(TLAS, Hit, PackedPayload);
+	}
+#else
+	TraceRay(
+		TLAS,
+		RayFlags,
+		InstanceInclusionMask,
+		RayContributionToHitGroupIndex,
+		MultiplierForGeometryContributionToShaderIndex,
+		MissShaderIndex,
+		Ray.GetNativeDesc(),
+		PackedPayload);
+#endif
+}
 
 FMinimalPayload HVPT_TraceVisibilityRay(
 	RaytracingAccelerationStructure TLAS,
@@ -15,7 +64,7 @@ FMinimalPayload HVPT_TraceVisibilityRay(
 	PackedPayload.SetFlags(RAY_TRACING_PAYLOAD_INPUT_FLAG_SHADOW_RAY);
 	PackedPayload.SetIgnoreTranslucentMaterials();
 
-	TraceVisibilityRayPacked(PackedPayload, TLAS, RayFlags, InstanceInclusionMask, Ray);
+	HVPT_TraceVisibilityRayPacked(PackedPayload, TLAS, RayFlags, InstanceInclusionMask, Ray);
 
 	// Unpack the payload
 	FMinimalPayload MinimalPayload = (FMinimalPayload) 0;
@@ -30,15 +79,15 @@ FMinimalPayload HVPT_TraceVisibilityRay(
 
 
 FMaterialClosestHitPayload HVPT_TraceMaterialRay(
-	in RaytracingAccelerationStructure TLAS,
-	in uint RayFlags,
-	in uint InstanceInclusionMask,
-	in FRayDesc Ray,
+	RaytracingAccelerationStructure TLAS,
+	uint RayFlags,
+	uint InstanceInclusionMask,
+	FRayDesc Ray,
 	// Payload Inputs
 	inout FRayCone RayCone,
-	in bool bEnableSkyLightContribution,
-	in bool bIgnoreTranslucentMaterials,
-	in bool bIsCameraRay)
+	bool bEnableSkyLightContribution,
+	bool bIgnoreTranslucentMaterials,
+	bool bIsCameraRay)
 {
 	const uint RayContributionToHitGroupIndex = RAY_TRACING_SHADER_SLOT_MATERIAL;
 	const uint MultiplierForGeometryContributionToShaderIndex = RAY_TRACING_NUM_SHADER_SLOTS;
@@ -67,7 +116,26 @@ FMaterialClosestHitPayload HVPT_TraceMaterialRay(
 	}
 
 	// Trace the ray
-
+#if	USE_SER
+	{
+		NvHitObject Hit;
+		NvTraceRayHitObject(
+			TLAS,
+			RayFlags,
+			InstanceInclusionMask,
+			RayContributionToHitGroupIndex,
+			MultiplierForGeometryContributionToShaderIndex,
+			MissShaderIndex,
+			Ray.GetNativeDesc(),
+			PackedPayload,
+			Hit);
+		if (!bIsCameraRay)
+		{
+			NvReorderThread(Hit);
+		}
+		NvInvokeHitObject(TLAS, Hit, PackedPayload);
+	}
+#else
 	TraceRay(
 		TLAS,
 		RayFlags,
@@ -77,9 +145,8 @@ FMaterialClosestHitPayload HVPT_TraceMaterialRay(
 		MissShaderIndex,
 		Ray.GetNativeDesc(),
 		PackedPayload);
-
+#endif
 	// Unpack the payload
-
 	FMaterialClosestHitPayload Payload = UnpackRayTracingPayload(PackedPayload, Ray);
 
 	RayCone = Payload.GetRayCone();
