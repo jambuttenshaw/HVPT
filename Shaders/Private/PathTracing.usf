@@ -129,18 +129,16 @@ float3 HVPT_TraceVisibilityRay(FRayDesc RayDesc, inout RandomSequence RandSequen
 			RayDesc.Origin, RayDesc.Direction, Intersection.VolumeTMin, Intersection.VolumeTMax,
 			RandomSequence_GenerateSample2D(RandSequence)
 		);
-		FHVPT_MajorantSample Sample = (FHVPT_MajorantSample)0;
-		
-		uint LoopGuard = 0;
-		while (SamplingContext.Sample(Sample) && LoopGuard++ < 128)
+		FHVPT_TrackingSample Sample = CreateTrackingSample();
+		while (SamplingContext.Sample(Sample))
 		{
 			float3 WorldPosition = RayDesc.Origin + Sample.Distance * RayDesc.Direction;
 			FVolumeShadedResult Result = HVPT_GetDensity(WorldPosition);
 
-			float3 Sigma_n = max(Sample.SigmaMaj - Result.SigmaT, 0.0f);
-			float PDF = Sample.MajorantTransmittance.x * Sample.SigmaMaj.x;
+			float3 Sigma_n = max(Sample.Sigma - Result.SigmaT, 0.0f);
+			float PDF = Sample.Transmittance.x * Sample.Sigma.x;
 			// TODO: Added 'saturate' is a bit of a hack, but it stopped NaN's appearing when this function was called from HVPT_DirectLight_Surface
-			Throughput *= saturate(Sample.MajorantTransmittance * Sigma_n / PDF);
+			Throughput *= saturate(Sample.Transmittance * Sigma_n / PDF);
 
 			// Perform russian roulette
 			if (max3(Throughput.x, Throughput.y, Throughput.z) < 0.05f)
@@ -163,7 +161,7 @@ float3 HVPT_TraceVisibilityRay(FRayDesc RayDesc, inout RandomSequence RandSequen
 			}
 		}
 		// Accumulate throughput from last sample point to exiting the volume
-		Throughput *= Sample.MajorantTransmittance;
+		Throughput *= Sample.Transmittance;
 
 #if APPLY_VOLUMETRIC_FOG
 		if (!Sample.IsValid()) // If escaped volume
@@ -269,17 +267,15 @@ bool HVPT_PathTracingKernel(inout FHVPT_PathState PathState, int Bounce)
 			RandomSequence_GenerateSample2D(PathState.RandSequence)
 		);
 
-		FHVPT_MajorantSample Sample = (FHVPT_MajorantSample)0;
-		
-		uint LoopGuard = 0;
-		while (SamplingContext.Sample(Sample) && LoopGuard++ < 256)
+		FHVPT_TrackingSample Sample = CreateTrackingSample();
+		while (SamplingContext.Sample(Sample))
 		{
 			// Get volume properties at point
 			float3 WorldPosition = PathState.Ray.Origin + Sample.Distance * PathState.Ray.Direction;
 			FVolumeShadedResult Result = HVPT_GetDensity(WorldPosition);
 
 			// Ensure that sigmaT is never above the majorant - this creates all sorts of weirdness
-			Result.SigmaT = min(Sample.SigmaMaj, Result.SigmaT);
+			Result.SigmaT = min(Sample.Sigma, Result.SigmaT);
 
 			float3 SigmaA = Result.SigmaT - Result.SigmaSHG;
 			float3 Albedo = saturate(Result.SigmaSHG / Result.SigmaT);
@@ -291,8 +287,8 @@ bool HVPT_PathTracingKernel(inout FHVPT_PathState PathState, int Bounce)
 			}
 
 			// Decide on scattering type
-			float AbsorptionProbability = Max(SigmaA) / Max(Sample.SigmaMaj);
-			float ScatteringProbability = Max(Result.SigmaSHG) / Max(Sample.SigmaMaj);
+			float AbsorptionProbability = Max(SigmaA) / Max(Sample.Sigma);
+			float ScatteringProbability = Max(Result.SigmaSHG) / Max(Sample.Sigma);
 			float NullProbability = max(0.0f, 1.0f - AbsorptionProbability - ScatteringProbability);
 
 			// Rescale probabilities to be (0,1]

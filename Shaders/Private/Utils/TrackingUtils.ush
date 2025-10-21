@@ -2,155 +2,9 @@
 #define TRACKINGUTILS_H
 
 #include "/Engine/Private/RayTracing/RayTracingCommon.ush"
-
-#include "/Engine/Private/PathTracing/Utilities/PathTracingRandomSequence.ush"
 #include "/Engine/Private/PathTracing/Volume/PathTracingVolumeCommon.ush"
 
-#include "DDAUtils.ush"
-#include "../VoxelGrid/VoxelGridUtils.ush"
-
-//
-// --- HETEROGENEOUS VOLUME SAMPLING METHODS
-//
-
-struct FHVPT_MajorantSample
-{
-	float Distance; // The parametric T value of where the sample occurred
-
-	float3 SigmaMaj; // The majorant at the sample location
-	float3 MajorantTransmittance;
-
-	// TODO: Also include PDF in the sample (will allow for underlying calculation of PDF to be abstracted, e.g. if moving to chromatic sampling)
-
-	bool IsValid()
-	{
-		// TODO: Is a T of 0 possible / desirable?
-		return Distance >= 0.0f;
-	}
-};
-
-
-struct FHVPT_MajorantSamplingContext
-{
-	// Contains the state for iterating through voxels along the ray using DDA
-	FHVPT_GridIterator Iterator;
-
-	float RayOriginToSegmentDistance; // Distance from RAY ORIGIN to the beginning of the current segment
-	float CurrentSegmentT; // Distance from where the ray enters the current segment to the last sample point
-	float3 SigmaMaj; // Majorant of the current segment - this needs to be retained between calls to Sample
-
-	RandomSequence RandSequence;
-
-	void Init(float3 InWorldRayOrigin,
-		float3 InWorldRayDirection,
-		float InVolumeTMin,
-		float InVolumeTMax,
-		float2 RandSample)
-	{
-		// Set up DDA
-		Iterator = HVPT_CreateTopLevelIterator(
-			InWorldRayOrigin,
-			InWorldRayDirection,
-			InVolumeTMin,
-			InVolumeTMax
-		);
-
-		RayOriginToSegmentDistance = InVolumeTMin;
-
-		CurrentSegmentT = 0.0f;
-		SigmaMaj = 0.0f;
-
-		RandSequence.SampleIndex = asuint(RandSample.x);
-		RandSequence.SampleSeed = asuint(RandSample.y);
-	}
-
-	// Draw a new sample from the majorant grid
-	// Advances DDA if sample exceeds current majorant segment
-	bool Sample(inout FHVPT_MajorantSample Sample)
-	{
-		// MajorantTransmittance actually accumulates OPTICAL DEPTH, from which transmittance is calculated just before the function returns
-		// This means only one exponential function is required per sample rather than one at every point transmittance is accumulated
-		Sample.MajorantTransmittance = 0.0f;
-
-		while (true)
-		{
-			// Progress to next segment if required
-			if (CurrentSegmentT >= Iterator.GetWorldDeltaT())
-			{
-				if (!Iterator.Next())
-				{
-					CurrentSegmentT = POSITIVE_INFINITY;
-
-					Sample.Distance = -1;
-					Sample.SigmaMaj = 0.0f; // There is no media outside grid
-					Sample.MajorantTransmittance = 1.0f;
-
-					return false;
-				}
-
-				// Get new majorant
-				// Majorant should never be less than 0 (and only equal to 0 in areas of empty space)
-				FMajorantData MajorantData = GetMajorantData(HVPT_OrthoGrid.MajorantGridBuffer[HVPT_GetTopLevelLinearIndex(Iterator)]);
-				SigmaMaj = max(MajorantData.Majorant, 0.0f);
-
-				if (SigmaMaj.x == 0.0f)
-				{
-					// Zero-valued majorant means empty space - all coefficients are 0
-
-					// Transmittance must still be accumulated (in case y/z components are not 0)
-					Sample.MajorantTransmittance += Iterator.GetWorldDeltaT() * SigmaMaj;
-
-					// Advance to end of segment
-					RayOriginToSegmentDistance += Iterator.GetWorldDeltaT();
-					CurrentSegmentT = POSITIVE_INFINITY;
-					continue;
-				}
-
-				// Move to the beginning of the segment
-				CurrentSegmentT = 0.0f;
-			}
-		
-			// Sample current segment
-			float u = RandomSequence_GenerateSample1D(RandSequence);
-			// Draw sample from exponential PDF proportional to majorant transmission
-			float SampleExponential = -log(1.0f - u) / SigmaMaj.x;
-			float SampleDistance = CurrentSegmentT + SampleExponential;
-
-			if (isinf(SampleExponential) || isnan(SampleExponential))
-			{
-				// For safety - if in doubt advance to the next segment to prevent getting stuck in infinite loops.
-				CurrentSegmentT = POSITIVE_INFINITY;
-			}
-			else if (SampleDistance < Iterator.GetWorldDeltaT())
-			{
-				// We remained within segment, can use this as a sample location
-				// Update transmittance to this location
-				Sample.MajorantTransmittance += SampleExponential * SigmaMaj;
-
-				CurrentSegmentT = SampleDistance;
-				break;
-			}
-			else // Sampled distance exceeds current segment
-			{
-				// Update transmittance and try to proceed to next segment
-				// This is the transmittance from TMin to the end of the majorant segment
-				float dt = Iterator.GetWorldDeltaT() - CurrentSegmentT;
-				Sample.MajorantTransmittance += dt * SigmaMaj;
-
-				// DDA.Next() will be called on the next iteration of the loop
-				RayOriginToSegmentDistance += Iterator.GetWorldDeltaT();
-				CurrentSegmentT = POSITIVE_INFINITY; // Signals DDA to advance - Will get reset after DDA advances
-			}
-		}
-
-		Sample.Distance = RayOriginToSegmentDistance + CurrentSegmentT;
-		Sample.SigmaMaj = SigmaMaj;
-		Sample.MajorantTransmittance = exp(-Sample.MajorantTransmittance);
-
-		return true;
-	}
-};
-
+#include "SamplingUtils.ush"
 
 //
 // --- TRACKING / TRANSMITTANCE METHODS
@@ -185,16 +39,16 @@ FHVPT_TrackingResult HVPT_DeltaTracking(FRayDesc Ray, inout RandomSequence RandS
 	FHVPT_TrackingResult Result = HVPT_CreateTrackingResult();
 
 	// Use delta tracking to sample the volume
-	FHVPT_MajorantSample Sample = (FHVPT_MajorantSample)0;
+	FHVPT_TrackingSample Sample = CreateTrackingSample();
 	while (SamplingContext.Sample(Sample))
 	{
 		// Get volume properties at point
 		float3 WorldPosition = Ray.Origin + Sample.Distance * Ray.Direction;
 		FVolumeShadedResult Properties = HVPT_GetDensity(WorldPosition);
-		Properties.SigmaT = min(Sample.SigmaMaj, Properties.SigmaT);
+		Properties.SigmaT = min(Sample.Sigma, Properties.SigmaT);
 
 		// Determine if this is a null sample
-		float3 NullProbability = max(0.0f, 1.0f - Properties.SigmaT / Sample.SigmaMaj);
+		float3 NullProbability = max(0.0f, 1.0f - Properties.SigmaT / Sample.Sigma);
 		float RandValue = RandomSequence_GenerateSample1D(RandSequence);
 		if (RandValue < max3(NullProbability.x, NullProbability.y, NullProbability.z))
 		{
@@ -217,6 +71,32 @@ FHVPT_TrackingResult HVPT_DeltaTracking(FRayDesc Ray, inout RandomSequence RandS
 	return Result;
 }
 
+FHVPT_TrackingResult HVPT_RegularTracking(FRayDesc Ray, inout RandomSequence RandSequence)
+{
+	FHVPT_RegularSamplingContext SamplingContext;
+	SamplingContext.Init(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RandomSequence_GenerateSample2D(RandSequence));
+
+	FHVPT_TrackingResult Result = HVPT_CreateTrackingResult();
+
+	// Use delta tracking to sample the volume
+	FHVPT_TrackingSample Sample = CreateTrackingSample();
+	if (SamplingContext.Sample(Sample))
+	{
+		// Get volume properties at point
+		float3 WorldPosition = Ray.Origin + Sample.Distance * Ray.Direction;
+		FVolumeShadedResult Properties = HVPT_GetDensity(WorldPosition);
+
+		Result.Distance = Sample.Distance;
+
+		Result.SigmaT = Properties.SigmaT;
+		Result.SigmaS = Properties.SigmaSHG;
+		Result.Emission = Properties.Emission;
+		Result.PhaseG = Properties.PhaseG;
+	}
+
+	return Result;
+}
+
 // Ratio tracking only gives the transmittance between two points
 float3 HVPT_RatioTracking(FRayDesc Ray, inout RandomSequence RandSequence)
 {
@@ -225,17 +105,17 @@ float3 HVPT_RatioTracking(FRayDesc Ray, inout RandomSequence RandSequence)
 	FHVPT_MajorantSamplingContext SamplingContext;
 	SamplingContext.Init(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RandomSequence_GenerateSample2D(RandSequence));
 	
-	FHVPT_MajorantSample Sample = (FHVPT_MajorantSample)0;
+	FHVPT_TrackingSample Sample = CreateTrackingSample();
 	while (SamplingContext.Sample(Sample))
 	{
 		// Get volume properties at point
 		float3 WorldPosition = Ray.Origin + Sample.Distance * Ray.Direction;
 		FVolumeShadedResult Properties = HVPT_GetDensity(WorldPosition);
 
-		Properties.SigmaT = min(Sample.SigmaMaj, Properties.SigmaT);
+		Properties.SigmaT = min(Sample.Sigma, Properties.SigmaT);
 		// Doing 1 - A/B gives negative values due to floating point rounding
 		// Doing (B - A)/B instead avoids this issue
-		Transmittance *= (Sample.SigmaMaj - Properties.SigmaT) / Sample.SigmaMaj;
+		Transmittance *= (Sample.Sigma - Properties.SigmaT) / Sample.Sigma;
 
 		if (!any(Transmittance > 0))
 		{
@@ -253,10 +133,10 @@ float3 HVPT_RatioTracking_Majorant(FRayDesc Ray, inout RandomSequence RandSequen
 	FHVPT_MajorantSamplingContext SamplingContext;
 	SamplingContext.Init(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax, RandomSequence_GenerateSample2D(RandSequence));
 	
-	FHVPT_MajorantSample Sample = (FHVPT_MajorantSample)0;
+	FHVPT_TrackingSample Sample = CreateTrackingSample();
 	while (SamplingContext.Sample(Sample))
 	{
-		Transmittance *= Sample.MajorantTransmittance;
+		Transmittance *= Sample.Transmittance;
 
 		if (!any(Transmittance > 0))
 		{
