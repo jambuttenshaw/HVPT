@@ -8,6 +8,7 @@
 #include "/Engine/Private/PathTracing/Volume/PathTracingFog.ush"
 
 #include "Utils/PathTracingUtils.ush"
+#include "Utils/RayTracingUtils.ush"
 #include "Utils/TrackingUtils.ush"
 
 
@@ -74,7 +75,7 @@ FPathTracingPayload HVPT_TraceRay(FRayDesc Ray, bool bIsCameraRay, out FVolumeIn
 	if (!bIsCameraRay)
 	{
 		FRayCone RayCone = (FRayCone) 0;
-		FMaterialClosestHitPayload MaterialPayload = TraceMaterialRay(
+		FMaterialClosestHitPayload MaterialPayload = HVPT_TraceMaterialRay(
 				TLAS,
 				0,
 				PATHTRACER_MASK_ALL,
@@ -109,7 +110,7 @@ float3 HVPT_TraceVisibilityRay(FRayDesc RayDesc, inout RandomSequence RandSequen
 	float3 Throughput = 1.0f;
 
 	// First try opaque surfaces
-	FMinimalPayload Payload = TraceVisibilityRay(
+	FMinimalPayload Payload = HVPT_TraceVisibilityRay(
 		TLAS,
 		RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
 		PATHTRACER_MASK_SHADOW,
