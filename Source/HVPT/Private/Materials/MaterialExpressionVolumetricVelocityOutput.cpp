@@ -31,6 +31,8 @@ void UMaterialExpressionVolumetricVelocityOutput::GetCaption(TArray<FString>& Ou
 	OutCaptions.Add(TEXT("Volumetric Velocity Output"));
 }
 
+#endif
+
 int32 UMaterialExpressionVolumetricVelocityOutput::GetNumOutputs() const
 {
 	return 1;
@@ -45,5 +47,3 @@ FString UMaterialExpressionVolumetricVelocityOutput::GetDisplayName() const
 {
 	return TEXT("Volumetric Velocity Output");
 }
-
-#endif

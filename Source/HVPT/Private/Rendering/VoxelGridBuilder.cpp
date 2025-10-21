@@ -29,11 +29,12 @@ struct FHVPT_RasterTileData
 	uint32 TopLevelGridLinearIndex;
 };
 
+#if WITH_EDITOR
 uint32 GetTypeHash(const FVolumetricMeshBatch& MeshBatch)
 {
 	return HashCombineFast(GetTypeHash(MeshBatch.Mesh), GetTypeHash(MeshBatch.Proxy));
 }
-
+#endif
 
 class FHVPT_MarkTopLevelGridVoxelsForFrustumGridCS : public FGlobalShader
 {

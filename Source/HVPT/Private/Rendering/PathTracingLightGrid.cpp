@@ -22,10 +22,10 @@
 
 #if RHI_RAYTRACING
 
-class FPathTracingSkylightPrepareCS : public FGlobalShader
+class FHVPT_PathTracingSkylightPrepareCS : public FGlobalShader
 {
-	DECLARE_GLOBAL_SHADER(FPathTracingSkylightPrepareCS)
-	SHADER_USE_PARAMETER_STRUCT(FPathTracingSkylightPrepareCS, FGlobalShader)
+	DECLARE_GLOBAL_SHADER(FHVPT_PathTracingSkylightPrepareCS)
+	SHADER_USE_PARAMETER_STRUCT(FHVPT_PathTracingSkylightPrepareCS, FGlobalShader)
 
 		static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
 	{
@@ -52,13 +52,13 @@ class FPathTracingSkylightPrepareCS : public FGlobalShader
 		SHADER_PARAMETER(FVector3f, SkyColor)
 	END_SHADER_PARAMETER_STRUCT()
 };
-IMPLEMENT_SHADER_TYPE(, FPathTracingSkylightPrepareCS, TEXT("/Plugin/HVPT/Private/PathTracingLightGrid.usf"), TEXT("PathTracingSkylightPrepareCS"), SF_Compute);
+IMPLEMENT_SHADER_TYPE(, FHVPT_PathTracingSkylightPrepareCS, TEXT("/Plugin/HVPT/Private/PathTracingLightGrid.usf"), TEXT("PathTracingSkylightPrepareCS"), SF_Compute);
 
 
-class FPathTracingBuildLightGridCS : public FGlobalShader
+class FHVPT_PathTracingBuildLightGridCS : public FGlobalShader
 {
-	DECLARE_GLOBAL_SHADER(FPathTracingBuildLightGridCS)
-	SHADER_USE_PARAMETER_STRUCT(FPathTracingBuildLightGridCS, FGlobalShader)
+	DECLARE_GLOBAL_SHADER(FHVPT_PathTracingBuildLightGridCS)
+	SHADER_USE_PARAMETER_STRUCT(FHVPT_PathTracingBuildLightGridCS, FGlobalShader)
 
 		static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
 	{
@@ -83,7 +83,7 @@ class FPathTracingBuildLightGridCS : public FGlobalShader
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWLightGridData)
 	END_SHADER_PARAMETER_STRUCT()
 };
-IMPLEMENT_SHADER_TYPE(, FPathTracingBuildLightGridCS, TEXT("/Plugin/HVPT/Private/PathTracingLightGrid.usf"), TEXT("PathTracingBuildLightGridCS"), SF_Compute);
+IMPLEMENT_SHADER_TYPE(, FHVPT_PathTracingBuildLightGridCS, TEXT("/Plugin/HVPT/Private/PathTracingLightGrid.usf"), TEXT("PathTracingBuildLightGridCS"), SF_Compute);
 
 
 RDG_REGISTER_BLACKBOARD_STRUCT(FPathTracingSkylight)
@@ -347,8 +347,8 @@ void PrepareSkyTexture_Internal(
 
 	// run a simple compute shader to sample the cubemap and prep the top level of the mipmap hierarchy
 	{
-		TShaderMapRef<FPathTracingSkylightPrepareCS> ComputeShader(GetGlobalShaderMap(FeatureLevel));
-		FPathTracingSkylightPrepareCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FPathTracingSkylightPrepareCS::FParameters>();
+		TShaderMapRef<FHVPT_PathTracingSkylightPrepareCS> ComputeShader(GetGlobalShaderMap(FeatureLevel));
+		FHVPT_PathTracingSkylightPrepareCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FHVPT_PathTracingSkylightPrepareCS::FParameters>();
 		PassParameters->SkyColor = FVector3f(SkyColor.R, SkyColor.G, SkyColor.B);
 		PassParameters->SkyLightCubemap0 = Parameters.SkyLightCubemap;
 		PassParameters->SkyLightCubemap1 = Parameters.SkyLightBlendDestinationCubemap;
@@ -508,7 +508,7 @@ void PrepareLightGrid(FRDGBuilder& GraphBuilder, ERHIFeatureLevel::Type FeatureL
 		LightGridParameters->LightGridMaxCount = MaxCount;
 
 		LightGridParameters->LightGridAxis = -1;
-		FPathTracingBuildLightGridCS::FParameters* LightGridPassParameters = GraphBuilder.AllocParameters<FPathTracingBuildLightGridCS::FParameters>();
+		FHVPT_PathTracingBuildLightGridCS::FParameters* LightGridPassParameters = GraphBuilder.AllocParameters<FHVPT_PathTracingBuildLightGridCS::FParameters>();
 
 		FRDGTextureDesc LightGridDesc = FRDGTextureDesc::Create2DArray(
 			FIntPoint(Resolution, Resolution),
@@ -546,7 +546,7 @@ void PrepareLightGrid(FRDGBuilder& GraphBuilder, ERHIFeatureLevel::Type FeatureL
 		LightGridPassParameters->SceneLights = LightsSRV;
 		LightGridPassParameters->SceneLightCount = NumLights;
 
-		TShaderMapRef<FPathTracingBuildLightGridCS> ComputeShader(GetGlobalShaderMap(FeatureLevel));
+		TShaderMapRef<FHVPT_PathTracingBuildLightGridCS> ComputeShader(GetGlobalShaderMap(FeatureLevel));
 		FComputeShaderUtils::AddPass(
 			GraphBuilder,
 			RDG_EVENT_NAME("Light Grid Create (%u lights)", NumFiniteLights),
