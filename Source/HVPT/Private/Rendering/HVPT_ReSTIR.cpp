@@ -203,6 +203,7 @@ public:
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
 
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Reservoir>, Reservoirs)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Bounce>, ExtraBounces)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -522,6 +523,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 		PopulateCommonParameters(&PassParameters->Common, 4);
 
 		PassParameters->Reservoirs = GraphBuilder.CreateSRV(ReservoirsB);
+		PassParameters->ExtraBounces = GraphBuilder.CreateSRV(ExtraBouncesB);
 
 		FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(ViewInfo.FeatureLevel);
 		TShaderMapRef<FReSTIRDebugVisualizationCS> ComputeShader(ShaderMap);

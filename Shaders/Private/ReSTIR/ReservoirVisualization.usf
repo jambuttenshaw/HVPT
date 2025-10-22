@@ -12,6 +12,7 @@
 
 
 StructuredBuffer<FHVPT_Reservoir> Reservoirs;
+StructuredBuffer<FHVPT_Bounce> ExtraBounces;
 
 uint DebugFlags;
 RWTexture2D<float3> RWDebugTexture;
@@ -50,10 +51,30 @@ void ReSTIRDebugVisualizationCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 			OutColor = NormalizedFloatAsHueToRGB(1.0f - (Reservoir.GetNumExtraBounces()) / (float)(NumBounces));
 			break;
 		case HVPT_DEBUG_VIEW_MODE_PATH_TYPE:
-			OutColor = (Reservoir.GetEmissionPath()) ? float3(1, 1, 0) : float3(0, 1, 1);
+		{
+			if (Reservoir.GetNumExtraBounces() > 0)
+			{
+				FHVPT_Bounce LastBounce = ExtraBounces[HVPT_GetExtraBounceIndex(PixelCoord, Reservoir.GetNumExtraBounces() - 1)];
+				if (HVPT_DecodeBounce(LastBounce).w == POSITIVE_INFINITY)
+				{
+					// Surface path
+					OutColor = float3(0, 0, 1);
+					break;
+				}
+			}
+
+			if (Reservoir.GetEmissionPath())
+			{
+				OutColor = float3(1, 0, 0);
+				break;
+			}
+
+			// Scattering path
+			OutColor = float3(0, 1, 0);
 			break;
+		}
 		case HVPT_DEBUG_VIEW_MODE_LIGHT_ID:
-			OutColor = NormalizedFloatAsHueToRGB((Reservoir.GetLightId()) / (float)(SceneLightCount));
+			OutColor = Reservoir.GetEmissionPath() ? 0.2f : NormalizedFloatAsHueToRGB((Reservoir.GetLightId()) / (float)(SceneLightCount));
 			break;
 		case HVPT_DEBUG_VIEW_MODE_TEMPORAL_REUSE:
 			// Written in TemporalReuse.usf
