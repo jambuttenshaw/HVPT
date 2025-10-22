@@ -102,6 +102,7 @@ float3 HVPT_CalculateLightVisibility(float3 TranslatedWorldPos, FLightSample Lig
 		bool bEscaped = false;
 		ScatteringVisibility = HVPT_CalculateTransmittance<ShadingQuality>(LightRay, RandSequence);
 
+/*
 #if APPLY_VOLUMETRIC_FOG
 		if (bEscaped)
 		{
@@ -111,6 +112,7 @@ float3 HVPT_CalculateLightVisibility(float3 TranslatedWorldPos, FLightSample Lig
 			ScatteringVisibility *= saturate(FogGetTransmittance(LightRay.Origin, LightRay.Direction, LightRay.TMin, LightRay.TMax));
 		}
 #endif
+*/
 	}
 
 	return ScatteringVisibility;

@@ -62,12 +62,12 @@ public:
 
 	class FMultipleBounces : SHADER_PERMUTATION_BOOL("MULTIPLE_BOUNCES");
 	class FUseSurfaceContributions : SHADER_PERMUTATION_BOOL("USE_SURFACE_CONTRIBUTIONS");
-	class FApplyVolumetricFog : SHADER_PERMUTATION_BOOL("APPLY_VOLUMETRIC_FOG");
+	//class FApplyVolumetricFog : SHADER_PERMUTATION_BOOL("APPLY_VOLUMETRIC_FOG");
 	class FUseSER : SHADER_PERMUTATION_BOOL("USE_SER");
 	class FDebugOutputEnabled : SHADER_PERMUTATION_BOOL("DEBUG_OUTPUT_ENABLED");
 	using FPermutationDomain = TShaderPermutationDomain<FMultipleBounces,
 														FUseSurfaceContributions,
-														FApplyVolumetricFog,
+														//FApplyVolumetricFog,
 														FUseSER,
 														FDebugOutputEnabled>;
 
@@ -231,7 +231,7 @@ void HVPT::PrepareRaytracingShadersReSTIR(const FViewInfo& View, const FHVPTView
 	{
 		Permutation.Set<typename T::FMultipleBounces>(HVPT::GetMaxBounces() > 1);
 		Permutation.Set<typename T::FUseSurfaceContributions>(HVPT::UseSurfaceContributions());
-		Permutation.Set<typename T::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
+		//Permutation.Set<typename T::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
 		Permutation.Set<typename T::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 		Permutation.Set<typename T::FUseSER>(HVPT::ShouldUseSER());
 		OutRayGenShaders.Add(ShaderMap->GetShader<T>(Permutation).GetRayTracingShader());
@@ -274,7 +274,7 @@ void AddRaytracingPass(
 	// Set common permutation vector dimensions here
 	Permutation.Set<typename Shader::FMultipleBounces>(HVPT::GetMaxBounces() > 1);
 	Permutation.Set<typename Shader::FUseSurfaceContributions>(HVPT::UseSurfaceContributions());
-	Permutation.Set<typename Shader::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
+	//Permutation.Set<typename Shader::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
 	Permutation.Set<typename Shader::FUseSER>(HVPT::ShouldUseSER());
 	Permutation.Set<typename Shader::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 	TShaderMapRef<Shader> RayGenShader(ViewInfo.ShaderMap, Permutation);
