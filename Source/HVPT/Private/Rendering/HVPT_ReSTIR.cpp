@@ -20,6 +20,14 @@ constexpr uint32 kReSTIRMaxBounces = 8;
 constexpr uint32 kReSTIRMaxSpatialSamples = 8;
 
 
+static TAutoConsoleVariable<bool> CVarHVPTReSTIRDeferEvaluateCandidateF(
+	TEXT("r.HVPT.ReSTIR.DeferEvaluateCandidateF"),
+	false,
+	TEXT("Defers evaluating candidate path contribution to a separate path to help reduce divergence."),
+	ECVF_RenderThreadSafe
+);
+
+
 #if RHI_RAYTRACING
 
 
@@ -102,6 +110,13 @@ public:
 	DECLARE_GLOBAL_SHADER(FReSTIRCandidateGenerationRGS);
 	SHADER_USE_ROOT_PARAMETER_STRUCT(FReSTIRCandidateGenerationRGS, FReSTIRBaseRGS);
 
+	class FDeferEvaluateF : SHADER_PERMUTATION_BOOL("DEFER_EVALUATE_F");
+	using FPermutationDomain = TShaderPermutationDomain<FReSTIRBaseRGS::FMultipleBounces,
+														FReSTIRBaseRGS::FUseSurfaceContributions,
+														FReSTIRBaseRGS::FUseSER,
+														FReSTIRBaseRGS::FDebugOutputEnabled,
+														FDeferEvaluateF>;
+
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
 
@@ -119,6 +134,22 @@ public:
 };
 
 IMPLEMENT_GLOBAL_SHADER(FReSTIRCandidateGenerationRGS, "/Plugin/HVPT/Private/ReSTIR/CandidateGeneration.usf", "ReSTIRCandidateGenerationRGS", SF_RayGen)
+
+class FReSTIRCandidateEvaluateFRGS : public FReSTIRBaseRGS
+{
+public:
+	DECLARE_GLOBAL_SHADER(FReSTIRCandidateEvaluateFRGS);
+	SHADER_USE_ROOT_PARAMETER_STRUCT(FReSTIRCandidateEvaluateFRGS, FReSTIRBaseRGS);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
+
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Reservoir>, RWCurrentReservoirs)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Bounce>, ExtraBounces)
+	END_SHADER_PARAMETER_STRUCT()
+};
+
+IMPLEMENT_GLOBAL_SHADER(FReSTIRCandidateEvaluateFRGS, "/Plugin/HVPT/Private/ReSTIR/CandidateGeneration.usf", "ReSTIRCandidateEvaluateFRGS", SF_RayGen)
 
 class FReSTIRTemporalReuseRGS : public FReSTIRBaseRGS
 {
@@ -238,7 +269,12 @@ void HVPT::PrepareRaytracingShadersReSTIR(const FViewInfo& View, const FHVPTView
 	};
 
 	// AddShader<T>() does not compile
-	AddShader.template operator()<FReSTIRCandidateGenerationRGS>();
+	{
+		FReSTIRCandidateGenerationRGS::FPermutationDomain Permutation;
+		Permutation.Set<FReSTIRCandidateGenerationRGS::FDeferEvaluateF>(CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread());
+		AddShader.template operator()<FReSTIRCandidateGenerationRGS>(Permutation);
+	}
+	AddShader.template operator()<FReSTIRCandidateEvaluateFRGS>();
 	AddShader.template operator()<FReSTIRTemporalReuseRGS>();
 	AddShader.template operator()<FReSTIRSpatialReuseRGS>();
 	AddShader.template operator()<FReSTIRFinalShadingRGS>();
@@ -371,7 +407,11 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 	// Unfortunately due to what appears to appear an Unreal bug (crashes during D3D12 pipeline state creation with E_INVALIDARG)
 	// using a uniform buffer to hold common parameters does not work
-	auto PopulateCommonParameters = [&](FReSTIRCommonParameters* Parameters, uint32 TemporalSeedOffset)
+	uint32 MaxNumPasses = 4;
+	MaxNumPasses += CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread() ? 1 : 0;
+	MaxNumPasses += (State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE) ? 1 : 0;
+	uint32 TemporalSeedOffset = 0;
+	auto PopulateCommonParameters = [&](FReSTIRCommonParameters* Parameters)
 		{
 			Parameters->View = ViewInfo.ViewUniformBuffer;
 			Parameters->SceneTextures = HVPT::Private::GetSceneTextureParameters(GraphBuilder, SceneTextures);
@@ -385,7 +425,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 			Parameters->FrustumGridUniformBuffer = State.FrustumGridUniformBuffer;
 
 			uint32 FrameIndex = ViewInfo.ViewState ? ViewInfo.ViewState->FrameIndex : 0;
-			Parameters->TemporalSeed = HVPT::GetFreezeTemporalSeed() ? 0 : 4 * FrameIndex + TemporalSeedOffset;
+			Parameters->TemporalSeed = HVPT::GetFreezeTemporalSeed() ? 0 : MaxNumPasses * FrameIndex + TemporalSeedOffset++;
 
 			Parameters->NumBounces = FMath::Clamp(HVPT::GetMaxBounces(), 1, kReSTIRMaxBounces);
 
@@ -400,26 +440,46 @@ void HVPT::RenderWithReSTIRPathTracing(
 	// Candidate Generation
 	{
 		RDG_EVENT_SCOPE(GraphBuilder, "HVPT: ReSTIR (Candidate Generation)");
+		{
+			FReSTIRCandidateGenerationRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRCandidateGenerationRGS::FParameters>();
+			PopulateCommonParameters(&PassParameters->Common);
 
-		FReSTIRCandidateGenerationRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRCandidateGenerationRGS::FParameters>();
-		PopulateCommonParameters(&PassParameters->Common, 0);
+			PassParameters->SceneDepthTexture_Copy = GraphBuilder.CreateSRV(State.DepthBufferCopy);
+			PassParameters->FeatureTexture = GraphBuilder.CreateSRV(State.FeatureTexture);
 
-		PassParameters->SceneDepthTexture_Copy = GraphBuilder.CreateSRV(State.DepthBufferCopy);
-		PassParameters->FeatureTexture = GraphBuilder.CreateSRV(State.FeatureTexture);
+			PassParameters->NumInitialCandidates = HVPT::GetNumInitialCandidates();
+			PassParameters->bUseShadowTermForCandidateGeneration = HVPT::GetUseShadowTermForCandidateGeneration();
 
-		PassParameters->NumInitialCandidates = HVPT::GetNumInitialCandidates();
-		PassParameters->bUseShadowTermForCandidateGeneration = HVPT::GetUseShadowTermForCandidateGeneration();
+			PassParameters->RWCurrentReservoirs = GraphBuilder.CreateUAV(ReservoirsA);
+			PassParameters->RWExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesA);
 
-		PassParameters->RWCurrentReservoirs = GraphBuilder.CreateUAV(ReservoirsA);
-		PassParameters->RWExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesA);
+			FReSTIRCandidateGenerationRGS::FPermutationDomain Permutation;
+			Permutation.Set<FReSTIRCandidateGenerationRGS::FDeferEvaluateF>(CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread());
+			AddRaytracingPass<FReSTIRCandidateGenerationRGS>(
+				GraphBuilder,
+				RDG_EVENT_NAME("ReSTIRCandidateGeneration"),
+				ViewInfo, 
+				State,
+				PassParameters,
+				Permutation
+			);
+		}
+		if (CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread())
+		{
+			FReSTIRCandidateEvaluateFRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRCandidateEvaluateFRGS::FParameters>();
+			PopulateCommonParameters(&PassParameters->Common);
 
-		AddRaytracingPass<FReSTIRCandidateGenerationRGS>(
-			GraphBuilder,
-			RDG_EVENT_NAME("ReSTIRCandidateGeneration"),
-			ViewInfo, 
-			State,
-			PassParameters
-		);
+			PassParameters->RWCurrentReservoirs = GraphBuilder.CreateUAV(ReservoirsA);
+			PassParameters->ExtraBounces = GraphBuilder.CreateSRV(ExtraBouncesA);
+
+			AddRaytracingPass<FReSTIRCandidateEvaluateFRGS>(
+				GraphBuilder,
+				RDG_EVENT_NAME("ReSTIRCandidateEvaluateF"),
+				ViewInfo,
+				State,
+				PassParameters
+			);
+		}
 	}
 
 	// Temporal Reuse (only when history is valid)
@@ -428,7 +488,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 		RDG_EVENT_SCOPE(GraphBuilder, "HVPT: ReSTIR (Temporal Reuse)");
 
 		FReSTIRTemporalReuseRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRTemporalReuseRGS::FParameters>();
-		PopulateCommonParameters(&PassParameters->Common, 1);
+		PopulateCommonParameters(&PassParameters->Common);
 
 		PassParameters->FeatureTexture = GraphBuilder.CreateSRV(State.FeatureTexture);
 		PassParameters->TemporalFeatureTexture = GraphBuilder.CreateSRV(bHasTemporalFeatureTexture ? State.TemporalFeatureTexture : GSystemTextures.GetBlackDummy(GraphBuilder));
@@ -458,7 +518,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 		RDG_EVENT_SCOPE(GraphBuilder, "HVPT: ReSTIR (Spatial Reuse)");
 
 		FReSTIRSpatialReuseRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRSpatialReuseRGS::FParameters>();
-		PopulateCommonParameters(&PassParameters->Common, 2);
+		PopulateCommonParameters(&PassParameters->Common);
 
 		PassParameters->FeatureTexture = GraphBuilder.CreateSRV(State.FeatureTexture);
 
@@ -498,7 +558,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 		RDG_EVENT_SCOPE(GraphBuilder, "HVPT: ReSTIR (Final Shading)");
 
 		FReSTIRFinalShadingRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRFinalShadingRGS::FParameters>();
-		PopulateCommonParameters(&PassParameters->Common, 3);
+		PopulateCommonParameters(&PassParameters->Common);
 
 		PassParameters->CurrentReservoirs = GraphBuilder.CreateSRV(ReservoirsB);
 		PassParameters->ExtraBounces = GraphBuilder.CreateSRV(ExtraBouncesB);
@@ -520,7 +580,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 		RDG_EVENT_SCOPE(GraphBuilder, "HVPT: ReSTIR (Debug Visualization)");
 
 		FReSTIRDebugVisualizationCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRDebugVisualizationCS::FParameters>();
-		PopulateCommonParameters(&PassParameters->Common, 4);
+		PopulateCommonParameters(&PassParameters->Common);
 
 		PassParameters->Reservoirs = GraphBuilder.CreateSRV(ReservoirsB);
 		PassParameters->ExtraBounces = GraphBuilder.CreateSRV(ExtraBouncesB);

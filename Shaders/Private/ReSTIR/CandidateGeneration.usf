@@ -398,6 +398,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 	// Store the sampled pixel in the reservoir, this is used to later retrieve its extra bounces
 	FinalReservoir.SetSampledPixel(HVPT_GetReservoirIndex(PixelCoord));
 
+#if !(DEFER_EVALUATE_F)
 	// Evaluate PHat
 	if (FinalReservoir.RunningSum > 0.0f)
 	{
@@ -409,6 +410,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 		FinalReservoir.RunningSum *= (FinalReservoir.P_y == 0.0f) ? 0.0f : PHat / FinalReservoir.P_y;
 		FinalReservoir.P_y = PHat;
 	}
+#endif
 
 	// Output reservoir
 	RWCurrentReservoirs[HVPT_GetReservoirIndex(PixelCoord)] = FinalReservoir;
@@ -421,4 +423,52 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 		RWExtraBounces[ExtraBounceIndex + i] = FinalExtraBounces[i];
 	}
 #endif
+}
+
+
+StructuredBuffer<FHVPT_Bounce> ExtraBounces;
+
+RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateFRGS)
+{
+	uint2 PixelCoord = DispatchRaysIndex().xy;
+	FHVPT_Reservoir Reservoir = RWCurrentReservoirs[HVPT_GetReservoirIndex(PixelCoord)];
+
+	if (Reservoir.RunningSum <= 0.0f)
+	{
+		return;
+	}
+
+	FRayDesc PrimaryRay = HVPT_CreateRayDesc(PixelCoord);
+
+	// For running sum to be greater than 0 the ray must have intersected with the volume
+	FVolumeIntersection VolIntersect = HVPT_Intersect(PrimaryRay.Origin, PrimaryRay.Direction, PrimaryRay.TMin, PrimaryRay.TMax);
+	PrimaryRay.TMin = VolIntersect.VolumeTMin;
+	PrimaryRay.TMax = VolIntersect.VolumeTMax;
+
+	// Create random sequence
+	RandomSequence RandSequence = (RandomSequence)0;
+	uint LinearPixelIndex = PixelCoord.y * View.ViewSizeAndInvSize.x + PixelCoord.x;
+	RandomSequence_Initialize(RandSequence, LinearPixelIndex, TemporalSeed);
+
+	// Load extra bounces
+#if MULTIPLE_BOUNCES
+	FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES];
+	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(PixelCoord, 0);
+	for (uint i = 0; i < Reservoir.GetNumExtraBounces(); i++)
+	{
+		Bounces[i] = ExtraBounces[ExtraBounceIndex + i];
+	}
+#endif
+
+	// Evaluate PHat
+	float PHat = Luminance(HVPT_EvaluateF<SHADING_QUALITY_CANDIDATE_GENERATION>(Reservoir,
+#if MULTIPLE_BOUNCES
+		Bounces,
+#endif
+		PrimaryRay, RandSequence));
+	Reservoir.RunningSum *= (Reservoir.P_y == 0.0f) ? 0.0f : PHat / Reservoir.P_y;
+	Reservoir.P_y = PHat;
+
+	// Output reservoir
+	RWCurrentReservoirs[HVPT_GetReservoirIndex(PixelCoord)] = Reservoir;
 }
