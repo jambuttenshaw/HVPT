@@ -25,14 +25,19 @@ uint HVPT_GetReservoirIndex(uint2 PixelCoord)
 	return PixelCoord.y * View.ViewSizeAndInvSize.x + PixelCoord.x;
 }
 
+uint2 HVPT_GetPixelCoord(uint ReservoirIndex)
+{
+	return uint2(ReservoirIndex % View.ViewSizeAndInvSize.x, ReservoirIndex / View.ViewSizeAndInvSize.x);
+}
+
 uint HVPT_GetExtraBounceIndex(uint2 PixelCoord, uint Bounce = 0)
 {
-	return (HVPT_GetReservoirIndex(PixelCoord) * (NumBounces - 1)) + Bounce;
+	return HVPT_GetReservoirIndex(PixelCoord) * (NumBounces - 1) + Bounce;
 }
 
 uint HVPT_GetExtraBounceIndex(uint ReservoirIndex, uint Bounce = 0)
 {
-	return (ReservoirIndex * (NumBounces - 1)) + Bounce;
+	return ReservoirIndex * (NumBounces - 1) + Bounce;
 }
 
 float3 HVPT_GetRayDirection(uint2 PixelCoord)

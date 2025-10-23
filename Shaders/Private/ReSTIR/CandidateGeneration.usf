@@ -32,6 +32,8 @@ uint bUseShadowTermForCandidateGeneration;
 RWStructuredBuffer<FHVPT_Reservoir> RWCurrentReservoirs;
 RWStructuredBuffer<FHVPT_Bounce> RWExtraBounces;
 
+StructuredBuffer<uint> ReservoirIndices;
+
 // Debug tools
 uint DebugFlags;
 RWTexture2D<float3> RWDebugTexture;
@@ -330,9 +332,8 @@ FHVPT_Reservoir ComputeInitialSample(
 }
 
 
-RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
+void ReSTIRCandidateGeneration_Main(uint2 PixelCoord, uint ReservoirIndex)
 {
-	uint2 PixelCoord = DispatchRaysIndex().xy;
 	FHVPT_Reservoir FinalReservoir = HVPT_CreateNewReservoir();
 
 	// We have already performed a prepass that determines if any media exists for this pixel
@@ -340,7 +341,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 	if (FeatureTexture[PixelCoord].r == 1.0f)
 	{
 		// Output an empty reservoir
-		RWCurrentReservoirs[HVPT_GetReservoirIndex(PixelCoord)] = FinalReservoir;
+		RWCurrentReservoirs[ReservoirIndex] = FinalReservoir;
 		return;
 	}
 
@@ -352,15 +353,8 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 	float DeviceZ = SceneDepthTexture_Copy.Load(uint3(PixelCoord, 0)).r;
 	FRayDesc PrimaryRay = HVPT_CreateRayDesc<true>(PixelCoord, DeviceZ);
 
-	// Find extents of intersection with volume bounding box
+	// Find extents of intersection with volume bounding box (if FeatureTexture transmittance < 1, we must have intersected the volume)
 	FVolumeIntersection VolIntersect = HVPT_Intersect(PrimaryRay.Origin, PrimaryRay.Direction, PrimaryRay.TMin, PrimaryRay.TMax);
-	if (!VolIntersect.HitVolume())
-	{
-		// Output an empty reservoir
-		RWCurrentReservoirs[HVPT_GetReservoirIndex(PixelCoord)] = FinalReservoir;
-		return;
-	}
-
 	PrimaryRay.TMin = VolIntersect.VolumeTMin;
 	PrimaryRay.TMax = VolIntersect.VolumeTMax;
 
@@ -383,20 +377,19 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 			RandSequence);
 
 		bool bSelected = HVPT_SimpleResampleStep<false>(OutReservoir, FinalReservoir, RandomSequence_GenerateSample1D(RandSequence));
-
+#if MULTIPLE_BOUNCES
 		if (bSelected)
 		{
-#if MULTIPLE_BOUNCES
 			for (uint Bounce = 0; Bounce < FinalReservoir.GetNumExtraBounces(); Bounce++)
 			{
 				FinalExtraBounces[Bounce] = OutBounces[Bounce];
 			}
-#endif
 		}
+#endif
 	} // For each initial candidate
 
 	// Store the sampled pixel in the reservoir, this is used to later retrieve its extra bounces
-	FinalReservoir.SetSampledPixel(HVPT_GetReservoirIndex(PixelCoord));
+	FinalReservoir.SetSampledPixel(ReservoirIndex);
 
 #if !(DEFER_EVALUATE_F)
 	// Evaluate PHat
@@ -413,7 +406,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 #endif
 
 	// Output reservoir
-	RWCurrentReservoirs[HVPT_GetReservoirIndex(PixelCoord)] = FinalReservoir;
+	RWCurrentReservoirs[ReservoirIndex] = FinalReservoir;
 
 #if MULTIPLE_BOUNCES
 	// Output bounces
@@ -425,13 +418,30 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 #endif
 }
 
+#if USE_DISPATCH_INDIRECT
+RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
+{
+	uint ReservoirIndex = ReservoirIndices[DispatchRaysIndex().x];
+	uint2 PixelCoord = HVPT_GetPixelCoord(ReservoirIndex);
+
+	ReSTIRCandidateGeneration_Main(PixelCoord, ReservoirIndex);
+}
+#else
+RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
+{
+	uint2 PixelCoord = DispatchRaysIndex().xy;
+	uint ReservoirIndex = HVPT_GetReservoirIndex(PixelCoord);
+
+	ReSTIRCandidateGeneration_Main(PixelCoord, ReservoirIndex);
+}
+#endif
+
 
 StructuredBuffer<FHVPT_Bounce> ExtraBounces;
 
-RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateFRGS)
+void ReSTIRCandidateEvaluateF_Main(uint2 PixelCoord, uint ReservoirIndex)
 {
-	uint2 PixelCoord = DispatchRaysIndex().xy;
-	FHVPT_Reservoir Reservoir = RWCurrentReservoirs[HVPT_GetReservoirIndex(PixelCoord)];
+	FHVPT_Reservoir Reservoir = RWCurrentReservoirs[ReservoirIndex];
 
 	if (Reservoir.RunningSum <= 0.0f)
 	{
@@ -470,5 +480,23 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateFRGS)
 	Reservoir.P_y = PHat;
 
 	// Output reservoir
-	RWCurrentReservoirs[HVPT_GetReservoirIndex(PixelCoord)] = Reservoir;
+	RWCurrentReservoirs[ReservoirIndex] = Reservoir;
 }
+
+#if USE_DISPATCH_INDIRECT
+RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateFRGS)
+{
+	uint ReservoirIndex = ReservoirIndices[DispatchRaysIndex().x];
+	uint2 PixelCoord = HVPT_GetPixelCoord(ReservoirIndex);
+
+	ReSTIRCandidateEvaluateF_Main(PixelCoord, ReservoirIndex);
+}
+#else
+RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateFRGS)
+{
+	uint2 PixelCoord = DispatchRaysIndex().xy;
+	uint ReservoirIndex = HVPT_GetReservoirIndex(PixelCoord);
+
+	ReSTIRCandidateEvaluateF_Main(PixelCoord, ReservoirIndex);
+}
+#endif

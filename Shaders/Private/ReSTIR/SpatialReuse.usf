@@ -34,6 +34,8 @@ StructuredBuffer<FHVPT_Bounce> InExtraBounces;
 RWStructuredBuffer<FHVPT_Reservoir> RWOutReservoirs;
 RWStructuredBuffer<FHVPT_Bounce> RWOutExtraBounces;
 
+StructuredBuffer<uint> ReservoirIndices;
+
 // Debug tools
 uint DebugFlags;
 RWTexture2D<float3> RWDebugTexture;
@@ -70,19 +72,13 @@ void WriteExtraBounces(uint ReservoirIndex, uint NumExtraBounces, FHVPT_Bounce B
 }
 #endif
 
-
-RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
+void ReSTIRSpatialReuse_Main(uint2 PixelCoord, uint ReservoirIndex)
 {
-	uint2 PixelCoord = DispatchRaysIndex().xy;
-
 	// Create an empty reservoir to hold the selected path
 	FHVPT_Reservoir OutReservoir = HVPT_CreateNewReservoir();
 #if MULTIPLE_BOUNCES
 	FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES];
 #endif
-
-	// Load current reservoir
-	uint ReservoirIndex = HVPT_GetReservoirIndex(PixelCoord);
 
 	RandomSequence RandSequence = (RandomSequence)0;
 	RandomSequence_Initialize(RandSequence, ReservoirIndex, TemporalSeed);
@@ -214,3 +210,22 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
 	}
 #endif
 }
+
+
+#if USE_DISPATCH_INDIRECT
+RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
+{
+	uint ReservoirIndex = ReservoirIndices[DispatchRaysIndex().x];
+	uint2 PixelCoord = HVPT_GetPixelCoord(ReservoirIndex);
+
+	ReSTIRSpatialReuse_Main(PixelCoord, ReservoirIndex);
+}
+#else
+RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuseRGS)
+{
+	uint2 PixelCoord = DispatchRaysIndex().xy;
+	uint ReservoirIndex = HVPT_GetReservoirIndex(PixelCoord);
+
+	ReSTIRSpatialReuse_Main(PixelCoord, ReservoirIndex);
+}
+#endif

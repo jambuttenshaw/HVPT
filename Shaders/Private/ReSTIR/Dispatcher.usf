@@ -1,0 +1,65 @@
+
+#include "/Engine/Private/Common.ush"
+#include "ReSTIRUtils.ush"
+
+
+#ifndef THREADGROUP_SIZE_1D
+#define THREADGROUP_SIZE_1D 1
+#endif // THREADGROUP_SIZE_1D
+
+#ifndef THREADGROUP_SIZE_2D
+#define THREADGROUP_SIZE_2D 1
+#endif // THREADGROUP_SIZE_2D
+
+
+Texture2D<float2> FeatureTexture;
+
+RWStructuredBuffer<uint> RWAllocatorBuffer;
+RWStructuredBuffer<uint> RWReservoirIndices;
+
+groupshared uint GSNumToAlloc;
+groupshared uint GSReservoirIndices[THREADGROUP_SIZE_1D];
+groupshared uint GSOutStartIndex;
+
+
+[numthreads(THREADGROUP_SIZE_2D, THREADGROUP_SIZE_2D, 1)]
+void ReSTIRDispatchRaysDispatcherCS(uint3 DTid : SV_DispatchThreadID, uint Gid : SV_GroupIndex)
+{
+	if (all(DTid == 0))
+	{
+		RWAllocatorBuffer[1] = 1;
+		RWAllocatorBuffer[2] = 1;
+	}
+
+	if (Gid == 0)
+	{
+		GSNumToAlloc = 0;
+	}
+
+	GroupMemoryBarrierWithGroupSync();
+
+	uint2 PixelCoord = DTid.xy;
+	if (all(PixelCoord <= View.ViewSizeAndInvSize.xy))
+	{
+		if (FeatureTexture[PixelCoord].r < 1.0f)
+		{
+			uint Index;
+			InterlockedAdd(GSNumToAlloc, 1, Index);
+			GSReservoirIndices[Index] = HVPT_GetReservoirIndex(PixelCoord);
+		}
+	}
+
+	GroupMemoryBarrierWithGroupSync();
+
+	if (Gid == 0 && GSNumToAlloc > 0)
+	{
+		InterlockedAdd(RWAllocatorBuffer[0], GSNumToAlloc, GSOutStartIndex);
+	}
+
+	GroupMemoryBarrierWithGroupSync();
+
+	if (Gid < GSNumToAlloc)
+	{
+		RWReservoirIndices[GSOutStartIndex + Gid] = GSReservoirIndices[Gid];
+	}
+}

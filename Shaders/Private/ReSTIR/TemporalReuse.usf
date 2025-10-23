@@ -32,6 +32,8 @@ float TemporalHistoryThreshold;
 uint bEnableTemporalReprojection;
 uint bTalbotMIS;
 
+StructuredBuffer<uint> ReservoirIndices;
+
 // Debug tools
 uint DebugFlags;
 RWTexture2D<float3> RWDebugTexture;
@@ -105,11 +107,8 @@ float3 GetHistoryScreenPosition(float2 ScreenPosition, float DeviceZ, float Repr
 }
 
 
-RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
+void ReSTIRTemporalReuse_Main(uint2 PixelCoord, uint ReservoirIndex)
 {
-	uint2 PixelCoord = DispatchRaysIndex().xy;
-	uint ReservoirIndex = HVPT_GetReservoirIndex(PixelCoord);
-
 	RandomSequence RandSequence = (RandomSequence)0;
 	RandomSequence_Initialize(RandSequence, ReservoirIndex, TemporalSeed);
 
@@ -343,3 +342,21 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
 	}
 #endif
 }
+
+#if USE_DISPATCH_INDIRECT
+RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
+{
+	uint ReservoirIndex = ReservoirIndices[DispatchRaysIndex().x];
+	uint2 PixelCoord = HVPT_GetPixelCoord(ReservoirIndex);
+
+	ReSTIRTemporalReuse_Main(PixelCoord, ReservoirIndex);
+}
+#else
+RAY_TRACING_ENTRY_RAYGEN(ReSTIRTemporalReuseRGS)
+{
+	uint2 PixelCoord = DispatchRaysIndex().xy;
+	uint ReservoirIndex = HVPT_GetReservoirIndex(PixelCoord);
+
+	ReSTIRTemporalReuse_Main(PixelCoord, ReservoirIndex);
+}
+#endif

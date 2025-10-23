@@ -20,6 +20,13 @@ constexpr uint32 kReSTIRMaxBounces = 8;
 constexpr uint32 kReSTIRMaxSpatialSamples = 8;
 
 
+static TAutoConsoleVariable<bool> CVarHVPTReSTIRUseDispatchIndirect(
+	TEXT("r.HVPT.ReSTIR.UseDispatchIndirect"),
+	false,
+	TEXT("Uses dispatch indirect to only dispatch threads that will definitely process volume media."),
+	ECVF_RenderThreadSafe
+);
+
 static TAutoConsoleVariable<bool> CVarHVPTReSTIRDeferEvaluateCandidateF(
 	TEXT("r.HVPT.ReSTIR.DeferEvaluateCandidateF"),
 	false,
@@ -58,10 +65,47 @@ BEGIN_SHADER_PARAMETER_STRUCT(FReSTIRCommonParameters, )
 
 	SHADER_PARAMETER(uint32, NumBounces)
 
+	// For indirect dispatch
+	SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, ReservoirIndices)
+	RDG_BUFFER_ACCESS(IndirectArgs, ERHIAccess::IndirectArgs)
+
 	// Debug tools
 	SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float3>, RWDebugTexture)
 	SHADER_PARAMETER(uint32, DebugFlags) // To represent debug modes etc
 END_SHADER_PARAMETER_STRUCT()
+
+
+class FReSTIRDispatchRaysDispatcherCS : public FGlobalShader
+{
+public:
+	DECLARE_GLOBAL_SHADER(FReSTIRDispatchRaysDispatcherCS);
+	SHADER_USE_PARAMETER_STRUCT(FReSTIRDispatchRaysDispatcherCS, FGlobalShader);
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float2>, FeatureTexture)
+
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWAllocatorBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWReservoirIndices)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
+	{
+		return HVPT::DoesPlatformSupportHVPT(Parameters.Platform);
+	}
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FGlobalShader::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE_1D"), GetThreadGroupSize1D());
+		OutEnvironment.SetDefine(TEXT("THREADGROUP_SIZE_2D"), GetThreadGroupSize2D());
+	}
+
+	static uint32 GetThreadGroupSize2D() { return 8; }
+	static uint32 GetThreadGroupSize1D() { return GetThreadGroupSize2D() * GetThreadGroupSize2D(); }
+};
+
+IMPLEMENT_GLOBAL_SHADER(FReSTIRDispatchRaysDispatcherCS, "/Plugin/HVPT/Private/ReSTIR/Dispatcher.usf", "ReSTIRDispatchRaysDispatcherCS", SF_Compute)
 
 
 class FReSTIRBaseRGS : public FGlobalShader
@@ -72,11 +116,13 @@ public:
 	class FUseSurfaceContributions : SHADER_PERMUTATION_BOOL("USE_SURFACE_CONTRIBUTIONS");
 	//class FApplyVolumetricFog : SHADER_PERMUTATION_BOOL("APPLY_VOLUMETRIC_FOG");
 	class FUseSER : SHADER_PERMUTATION_BOOL("USE_SER");
+	class FUseDispatchIndirect : SHADER_PERMUTATION_BOOL("USE_DISPATCH_INDIRECT");
 	class FDebugOutputEnabled : SHADER_PERMUTATION_BOOL("DEBUG_OUTPUT_ENABLED");
 	using FPermutationDomain = TShaderPermutationDomain<FMultipleBounces,
 														FUseSurfaceContributions,
 														//FApplyVolumetricFog,
 														FUseSER,
+														FUseDispatchIndirect,
 														FDebugOutputEnabled>;
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -114,6 +160,7 @@ public:
 	using FPermutationDomain = TShaderPermutationDomain<FReSTIRBaseRGS::FMultipleBounces,
 														FReSTIRBaseRGS::FUseSurfaceContributions,
 														FReSTIRBaseRGS::FUseSER,
+														FReSTIRBaseRGS::FUseDispatchIndirect,
 														FReSTIRBaseRGS::FDebugOutputEnabled,
 														FDeferEvaluateF>;
 
@@ -263,8 +310,9 @@ void HVPT::PrepareRaytracingShadersReSTIR(const FViewInfo& View, const FHVPTView
 		Permutation.Set<typename T::FMultipleBounces>(HVPT::GetMaxBounces() > 1);
 		Permutation.Set<typename T::FUseSurfaceContributions>(HVPT::UseSurfaceContributions());
 		//Permutation.Set<typename T::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
-		Permutation.Set<typename T::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 		Permutation.Set<typename T::FUseSER>(HVPT::ShouldUseSER());
+		Permutation.Set<typename T::FUseDispatchIndirect>(CVarHVPTReSTIRUseDispatchIndirect.GetValueOnRenderThread());
+		Permutation.Set<typename T::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 		OutRayGenShaders.Add(ShaderMap->GetShader<T>(Permutation).GetRayTracingShader());
 	};
 
@@ -287,11 +335,13 @@ void AddRaytracingPass(
 	FRDGEventName&& EventName,
 	const FViewInfo& View,
 	const FHVPTViewState& State,
-	typename Shader::FParameters* PassParameters
+	typename Shader::FParameters* PassParameters,
+	FRDGBufferRef ArgumentBuffer,
+	uint32 ArgumentOffset = 0
 )
 {
 	typename Shader::FPermutationDomain Permutation;
-	AddRaytracingPass<Shader>(GraphBuilder, std::move(EventName), View, State, PassParameters, Permutation);
+	AddRaytracingPass<Shader>(GraphBuilder, std::move(EventName), View, State, PassParameters, Permutation, ArgumentBuffer, ArgumentOffset);
 }
 
 template <typename Shader>
@@ -301,17 +351,20 @@ void AddRaytracingPass(
 	const FViewInfo& ViewInfo,
 	const FHVPTViewState& State,
 	typename Shader::FParameters* PassParameters,
-	typename Shader::FPermutationDomain& Permutation
+	typename Shader::FPermutationDomain& Permutation,
+	FRDGBufferRef ArgumentBuffer,
+	uint32 ArgumentOffset = 0
 )
 {
-	auto DispatchSize = ViewInfo.ViewRect.Size();
 	FRHIUniformBuffer* SceneUniformBuffer = ViewInfo.GetSceneUniforms().GetBufferRHI(GraphBuilder);
+	bool bDispatchIndirect = CVarHVPTReSTIRUseDispatchIndirect.GetValueOnRenderThread();
 
 	// Set common permutation vector dimensions here
 	Permutation.Set<typename Shader::FMultipleBounces>(HVPT::GetMaxBounces() > 1);
 	Permutation.Set<typename Shader::FUseSurfaceContributions>(HVPT::UseSurfaceContributions());
 	//Permutation.Set<typename Shader::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
 	Permutation.Set<typename Shader::FUseSER>(HVPT::ShouldUseSER());
+	Permutation.Set<typename Shader::FUseDispatchIndirect>(bDispatchIndirect);
 	Permutation.Set<typename Shader::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 	TShaderMapRef<Shader> RayGenShader(ViewInfo.ShaderMap, Permutation);
 
@@ -319,8 +372,11 @@ void AddRaytracingPass(
 		std::move(EventName),
 		PassParameters,
 		ERDGPassFlags::Compute | ERDGPassFlags::NeverCull,
-		[PassParameters, SceneUniformBuffer, RayGenShader, DispatchSize, &ViewInfo](FRHICommandList& RHICmdList)
+		[PassParameters, SceneUniformBuffer, RayGenShader, ArgumentBuffer, ArgumentOffset, bDispatchIndirect, &ViewInfo](FRHICommandList& RHICmdList)
 		{
+			if (ArgumentBuffer)
+				ArgumentBuffer->MarkResourceAsUsed();
+
 			FRHIBatchedShaderParameters& GlobalResources = RHICmdList.GetScratchShaderParameters();
 			SetShaderParameters(GlobalResources, RayGenShader, *PassParameters);
 			TOptional<FScopedUniformBufferStaticBindings> StaticUniformBufferScope =
@@ -330,22 +386,45 @@ void AddRaytracingPass(
 				RayTracing::BindStaticUniformBufferBindings(ViewInfo, SceneUniformBuffer, RHICmdList);
 #endif
 
-			RHICmdList.RayTraceDispatch(
+			if (bDispatchIndirect)
+			{
+				RHICmdList.RayTraceDispatchIndirect(
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
-				ViewInfo.MaterialRayTracingData.PipelineState,
+					ViewInfo.MaterialRayTracingData.PipelineState,
 #else
-				ViewInfo.RayTracingMaterialPipeline,
+					ViewInfo.RayTracingMaterialPipeline,
 #endif
-				RayGenShader.GetRayTracingShader(),
+					RayGenShader.GetRayTracingShader(),
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
-				ViewInfo.MaterialRayTracingData.ShaderBindingTable,
+					ViewInfo.MaterialRayTracingData.ShaderBindingTable,
 #else
-				ViewInfo.RayTracingSBT,
+					ViewInfo.RayTracingSBT,
 #endif
-				GlobalResources,
-				DispatchSize.X,
-				DispatchSize.Y
-			);
+					GlobalResources,
+					ArgumentBuffer->GetRHI(),
+					ArgumentOffset
+				);
+			}
+			else
+			{
+				auto DispatchSize = ViewInfo.ViewRect.Size();
+				RHICmdList.RayTraceDispatch(
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
+					ViewInfo.MaterialRayTracingData.PipelineState,
+#else
+					ViewInfo.RayTracingMaterialPipeline,
+#endif
+					RayGenShader.GetRayTracingShader(),
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 6
+					ViewInfo.MaterialRayTracingData.ShaderBindingTable,
+#else
+					ViewInfo.RayTracingSBT,
+#endif
+					GlobalResources,
+					DispatchSize.X,
+					DispatchSize.Y
+				);
+			}
 		});
 }
 
@@ -366,8 +445,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 	auto ExtraBounceDesc = FRDGBufferDesc::CreateStructuredDesc(sizeof(FHVPT_Bounce),
 		FMath::Max(Extent.X * Extent.Y * (HVPT::GetMaxBounces() - 1), 1));
 
-	FRDGBufferRef ReservoirsA = GraphBuilder.CreateBuffer(ReservoirDesc, TEXT("HeterogeneousVolumes.ReservoirsA"));
-	FRDGBufferRef ExtraBouncesA = GraphBuilder.CreateBuffer(ExtraBounceDesc, TEXT("HeterogeneousVolumes.ExtraBouncesA"));
+	FRDGBufferRef ReservoirsA = GraphBuilder.CreateBuffer(ReservoirDesc, TEXT("HVPT.ReservoirsA"));
+	FRDGBufferRef ExtraBouncesA = GraphBuilder.CreateBuffer(ExtraBounceDesc, TEXT("HVPT.ExtraBouncesA"));
 
 	AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ReservoirsA), 0);
 	AddClearUAVFloatPass(GraphBuilder, GraphBuilder.CreateUAV(ExtraBouncesA), 0.0f);
@@ -384,8 +463,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 	else
 	{
 		// No valid history - create empty buffers
-		ReservoirsB = GraphBuilder.CreateBuffer(ReservoirDesc, TEXT("HeterogeneousVolumes.ReservoirsB"));
-		ExtraBouncesB = GraphBuilder.CreateBuffer(ExtraBounceDesc, TEXT("HeterogeneousVolumes.ExtraBouncesB"));
+		ReservoirsB = GraphBuilder.CreateBuffer(ReservoirDesc, TEXT("HVPT.ReservoirsB"));
+		ExtraBouncesB = GraphBuilder.CreateBuffer(ExtraBounceDesc, TEXT("HVPT.ExtraBouncesB"));
 
 		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ReservoirsA), 0);
 		AddClearUAVFloatPass(GraphBuilder, GraphBuilder.CreateUAV(ExtraBouncesA), 0.0f);
@@ -405,8 +484,38 @@ void HVPT::RenderWithReSTIRPathTracing(
 	);
 	FHVPT_PathTracingFogParameters FogParameters = HVPT::Private::PrepareFogParameters(ViewInfo, Scene.ExponentialFogs[0]);
 
-	// Unfortunately due to what appears to appear an Unreal bug (crashes during D3D12 pipeline state creation with E_INVALIDARG)
-	// using a uniform buffer to hold common parameters does not work
+	FRDGBufferRef DispatchRaysIndirectArgumentBuffer;
+	FRDGBufferRef ReservoirIndicesBuffer;
+	if (CVarHVPTReSTIRUseDispatchIndirect.GetValueOnRenderThread())
+	{
+		DispatchRaysIndirectArgumentBuffer = GraphBuilder.CreateBuffer(
+			FRDGBufferDesc::CreateIndirectDesc<FRHIDispatchIndirectParameters>(), TEXT("HVPT.ReSTIR.DispatchRaysIndirectArgs"));
+		ReservoirIndicesBuffer = GraphBuilder.CreateBuffer(
+			FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), Extent.X * Extent.Y), TEXT("HVPT.ReSTIR.ReservoirIndices"));
+
+		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(DispatchRaysIndirectArgumentBuffer), 0);
+
+		// Execute dispatcher
+		{
+			FReSTIRDispatchRaysDispatcherCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRDispatchRaysDispatcherCS::FParameters>();
+			PassParameters->View = ViewInfo.ViewUniformBuffer;
+			PassParameters->FeatureTexture = GraphBuilder.CreateSRV(State.FeatureTexture);
+			PassParameters->RWAllocatorBuffer = GraphBuilder.CreateUAV(DispatchRaysIndirectArgumentBuffer);
+			PassParameters->RWReservoirIndices = GraphBuilder.CreateUAV(ReservoirIndicesBuffer);
+			TShaderMapRef<FReSTIRDispatchRaysDispatcherCS> ComputeShader(ViewInfo.ShaderMap);
+
+			const auto GroupCount = FComputeShaderUtils::GetGroupCount(Extent, FReSTIRDispatchRaysDispatcherCS::GetThreadGroupSize2D());
+			FComputeShaderUtils::AddPass(
+				GraphBuilder,
+				RDG_EVENT_NAME("ReSTIRDispatcher"),
+				ERDGPassFlags::Compute,
+				ComputeShader,
+				PassParameters,
+				GroupCount
+			);
+		}
+	}
+
 	uint32 MaxNumPasses = 4;
 	MaxNumPasses += CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread() ? 1 : 0;
 	MaxNumPasses += (State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE) ? 1 : 0;
@@ -429,13 +538,17 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 			Parameters->NumBounces = FMath::Clamp(HVPT::GetMaxBounces(), 1, kReSTIRMaxBounces);
 
+			if (CVarHVPTReSTIRUseDispatchIndirect.GetValueOnRenderThread())
+			{
+				Parameters->ReservoirIndices = GraphBuilder.CreateSRV(ReservoirIndicesBuffer);
+				Parameters->IndirectArgs = DispatchRaysIndirectArgumentBuffer;
+			}
 			if (State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE)
 			{
 				Parameters->RWDebugTexture = GraphBuilder.CreateUAV(State.DebugTexture);
 				Parameters->DebugFlags = State.DebugFlags;
 			}
 		};
-
 
 	// Candidate Generation
 	{
@@ -461,7 +574,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 				ViewInfo, 
 				State,
 				PassParameters,
-				Permutation
+				Permutation,
+				DispatchRaysIndirectArgumentBuffer
 			);
 		}
 		if (CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread())
@@ -477,7 +591,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 				RDG_EVENT_NAME("ReSTIRCandidateEvaluateF"),
 				ViewInfo,
 				State,
-				PassParameters
+				PassParameters,
+				DispatchRaysIndirectArgumentBuffer
 			);
 		}
 	}
@@ -508,7 +623,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 			RDG_EVENT_NAME("ReSTIRTemporalReuse"),
 			ViewInfo,
 			State,
-			PassParameters
+			PassParameters,
+			DispatchRaysIndirectArgumentBuffer
 		);
 	}
 
@@ -537,7 +653,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 			RDG_EVENT_NAME("ReSTIRSpatialReuse"),
 			ViewInfo,
 			State,
-			PassParameters
+			PassParameters,
+			DispatchRaysIndirectArgumentBuffer
 		);
 	}
 	else
@@ -570,7 +687,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 			RDG_EVENT_NAME("ReSTIRFinalShading"),
 			ViewInfo, 
 			State,
-			PassParameters
+			PassParameters,
+			DispatchRaysIndirectArgumentBuffer
 		);
 	}
 
