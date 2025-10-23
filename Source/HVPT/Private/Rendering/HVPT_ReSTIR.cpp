@@ -29,7 +29,7 @@ static TAutoConsoleVariable<bool> CVarHVPTReSTIRUseDispatchIndirect(
 
 static TAutoConsoleVariable<bool> CVarHVPTReSTIRDeferEvaluateCandidateF(
 	TEXT("r.HVPT.ReSTIR.DeferEvaluateCandidateF"),
-	false,
+	true,
 	TEXT("Defers evaluating candidate path contribution to a separate path to help reduce divergence."),
 	ECVF_RenderThreadSafe
 );
