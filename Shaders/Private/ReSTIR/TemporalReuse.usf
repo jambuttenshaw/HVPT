@@ -316,8 +316,8 @@ void ReSTIRTemporalReuse_Main(uint2 PixelCoord, uint ReservoirIndex)
 		}
 	}
 
-	uint ExtraBouncePixelIndex = OutReservoir.GetSampledPixel();
-	OutReservoir.SetSampledPixel(ReservoirIndex);
+	uint ExtraBouncePixelIndex = OutReservoir.GetReservoirIndex();
+	OutReservoir.SetReservoirIndex(ReservoirIndex);
 
 	RWCurrentReservoirs[ReservoirIndex] = OutReservoir;
 

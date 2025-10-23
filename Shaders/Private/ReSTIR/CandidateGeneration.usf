@@ -389,7 +389,7 @@ void ReSTIRCandidateGeneration_Main(uint2 PixelCoord, uint ReservoirIndex)
 	} // For each initial candidate
 
 	// Store the sampled pixel in the reservoir, this is used to later retrieve its extra bounces
-	FinalReservoir.SetSampledPixel(ReservoirIndex);
+	FinalReservoir.SetReservoirIndex(ReservoirIndex);
 
 #if !(DEFER_EVALUATE_F)
 	// Evaluate PHat

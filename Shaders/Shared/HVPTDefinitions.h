@@ -16,7 +16,7 @@ struct FHVPT_Reservoir
 	float P_y;			// The target function evaluation for the sample in this reservoir
 
 	// PackedData.x:
-	//		Top 28 bits: SampledPixel (linear index into reservoir buffer) (23 bits are required for 3840x2160 frame)
+	//		Top 28 bits: Reservoir index (linear index into reservoir buffer) (23 bits are required for 3840x2160 frame)
 	//		Next 3 bits: NumExtraBounces (supports up to 8 bounces in total)
 	//		Final bit:   bEmissionPath
 	// PackedData.y:
@@ -44,11 +44,11 @@ struct FHVPT_Reservoir
 		return (PackedData.x & 0x0000000E) >> 1;
 	}
 
-	void SetSampledPixel(uint SampledPixel)
+	void SetReservoirIndex(uint ReservoirIndex)
 	{
-		PackedData.x = (PackedData.x & 0x0000000F) | (SampledPixel << 4);
+		PackedData.x = (PackedData.x & 0x0000000F) | (ReservoirIndex << 4);
 	}
-	uint GetSampledPixel()
+	uint GetReservoirIndex()
 	{
 		return PackedData.x >> 4;
 	}
