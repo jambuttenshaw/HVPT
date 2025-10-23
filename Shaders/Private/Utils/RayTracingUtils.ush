@@ -11,10 +11,10 @@
 void HVPT_TraceVisibilityRayPacked(
 	inout FPackedMaterialClosestHitPayload PackedPayload,
 	RaytracingAccelerationStructure TLAS,
-	uint RayFlags,
-	uint InstanceInclusionMask,
 	FRayDesc Ray)
 {
+	const uint RayFlags = RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER;
+	const uint InstanceInclusionMask = PATHTRACER_MASK_ALL;
 	const uint RayContributionToHitGroupIndex = RAY_TRACING_SHADER_SLOT_SHADOW;
 	const uint MultiplierForGeometryContributionToShaderIndex = RAY_TRACING_NUM_SHADER_SLOTS;
 	const uint MissShaderIndex = 0;
@@ -55,16 +55,13 @@ void HVPT_TraceVisibilityRayPacked(
 
 FMinimalPayload HVPT_TraceVisibilityRay(
 	RaytracingAccelerationStructure TLAS,
-	uint RayFlags,
-	uint InstanceInclusionMask,
 	FRayDesc Ray)
 {
 	FPackedMaterialClosestHitPayload PackedPayload = (FPackedMaterialClosestHitPayload) 0;
-	
 	PackedPayload.SetFlags(RAY_TRACING_PAYLOAD_INPUT_FLAG_SHADOW_RAY);
 	PackedPayload.SetIgnoreTranslucentMaterials();
 
-	HVPT_TraceVisibilityRayPacked(PackedPayload, TLAS, RayFlags, InstanceInclusionMask, Ray);
+	HVPT_TraceVisibilityRayPacked(PackedPayload, TLAS, Ray);
 
 	// Unpack the payload
 	FMinimalPayload MinimalPayload = (FMinimalPayload) 0;
@@ -80,40 +77,17 @@ FMinimalPayload HVPT_TraceVisibilityRay(
 
 FMaterialClosestHitPayload HVPT_TraceMaterialRay(
 	RaytracingAccelerationStructure TLAS,
-	uint RayFlags,
-	uint InstanceInclusionMask,
-	FRayDesc Ray,
-	// Payload Inputs
-	inout FRayCone RayCone,
-	bool bEnableSkyLightContribution,
-	bool bIgnoreTranslucentMaterials,
-	bool bIsCameraRay)
+	FRayDesc Ray)
 {
+	const uint RayFlags = 0;
+	const uint InstanceInclusionMask = PATHTRACER_MASK_ALL;
 	const uint RayContributionToHitGroupIndex = RAY_TRACING_SHADER_SLOT_MATERIAL;
 	const uint MultiplierForGeometryContributionToShaderIndex = RAY_TRACING_NUM_SHADER_SLOTS;
 	const uint MissShaderIndex = 0;
 
 	FPackedMaterialClosestHitPayload PackedPayload = (FPackedMaterialClosestHitPayload) 0;
-
-	// Set payload inputs
-
-	PackedPayload.SetRayCone(RayCone);
-
-	if (bEnableSkyLightContribution)
-	{
-		// Enable Sky Light contribution in the payload if requested
-		PackedPayload.SetEnableSkyLightContribution();
-	}
-	
-	if (bIgnoreTranslucentMaterials)
-	{
-		PackedPayload.SetIgnoreTranslucentMaterials();
-	}
-
-	if (bIsCameraRay)
-	{
-		PackedPayload.SetCameraRay();
-	}
+	PackedPayload.SetEnableSkyLightContribution();
+	PackedPayload.SetIgnoreTranslucentMaterials();
 
 	// Trace the ray
 #if	USE_SER
@@ -129,10 +103,7 @@ FMaterialClosestHitPayload HVPT_TraceMaterialRay(
 			Ray.GetNativeDesc(),
 			PackedPayload,
 			Hit);
-		if (!bIsCameraRay)
-		{
-			NvReorderThread(Hit);
-		}
+		NvReorderThread(Hit);
 		NvInvokeHitObject(TLAS, Hit, PackedPayload);
 	}
 #else
@@ -148,9 +119,6 @@ FMaterialClosestHitPayload HVPT_TraceMaterialRay(
 #endif
 	// Unpack the payload
 	FMaterialClosestHitPayload Payload = UnpackRayTracingPayload(PackedPayload, Ray);
-
-	RayCone = Payload.GetRayCone();
-
 	return Payload;
 }
 

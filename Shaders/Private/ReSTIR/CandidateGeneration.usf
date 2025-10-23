@@ -257,17 +257,8 @@ FHVPT_Reservoir ComputeInitialSample(
 			FRayDesc SurfaceRay = Ray;
 			SurfaceRay.TMin = 0.0f;
 			SurfaceRay.TMax = POSITIVE_INFINITY;
-			FRayCone RayCone = (FRayCone)0;
-			FMaterialClosestHitPayload HitInfo = HVPT_TraceMaterialRay(
-				TLAS,
-				0,
-				PATHTRACER_MASK_ALL,
-				SurfaceRay,
-				RayCone,
-				false,
-				true,
-				true
-			);
+			FMaterialClosestHitPayload HitInfo = HVPT_TraceMaterialRay(TLAS, SurfaceRay);
+
 			if (HitInfo.IsHit())
 			{
 				FPathTracingPayload Payload = HVPT_CreateSurfaceHitPayload(HitInfo);

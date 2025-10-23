@@ -68,11 +68,7 @@ bool HVPT_IsShadowed(float3 Origin, float3 Direction, float TMin, float TMax)
 	Ray.TMax = TMax;
 
 	// Try opaque surfaces first
-	FMinimalPayload Payload = HVPT_TraceVisibilityRay(
-				TLAS,
-				RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
-				PATHTRACER_MASK_SHADOW,
-				Ray);
+	FMinimalPayload Payload = HVPT_TraceVisibilityRay(TLAS, Ray);
 
 	return Payload.IsHit();
 }
@@ -197,18 +193,7 @@ float3 HVPT_EvaluateF(
 		// Trace ray to surface
 		Ray.TMin = 0.0f;
 		Ray.TMax = POSITIVE_INFINITY;
-
-		FRayCone RayCone = (FRayCone) 0;
-		FMaterialClosestHitPayload MaterialPayload = HVPT_TraceMaterialRay(
-			TLAS,
-			0,
-			PATHTRACER_MASK_ALL,
-			Ray,
-			RayCone,
-			false,
-			true,
-			false
-		);
+		FMaterialClosestHitPayload MaterialPayload = HVPT_TraceMaterialRay(TLAS, Ray);
 
 		if (Reservoir.GetEmissionPath())
 		{
