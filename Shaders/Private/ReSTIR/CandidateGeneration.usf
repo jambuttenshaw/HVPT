@@ -132,6 +132,7 @@ float3 SampleDirectLighting(
 
 FHVPT_Reservoir ComputeInitialSample(
 	uint ReservoirIndex,
+	uint CandidateIndex,
 	FRayDesc Ray,
 #if MULTIPLE_BOUNCES
 	inout FHVPT_Bounce ExtraBounces[MAX_EXTRA_BOUNCES],
@@ -286,12 +287,12 @@ FHVPT_Reservoir ComputeInitialSample(
 			uint AllocatedIndex;
 			bool bAllocSuccess = true;
 
-			InterlockedAdd(RWDeferredSurfaceBounceAllocator[0], 1, AllocatedIndex);
+			InterlockedAdd(RWDeferredSurfaceBounceAllocator[CandidateIndex], 1, AllocatedIndex);
 			if (AllocatedIndex >= SurfaceBounceAllocatorSize)
 			{
 				// Declare surface bounces fully allocated
 				uint Dummy;
-				InterlockedExchange(RWDeferredSurfaceBounceAllocator[0], SurfaceBounceAllocatorSize, Dummy);
+				InterlockedExchange(RWDeferredSurfaceBounceAllocator[CandidateIndex], SurfaceBounceAllocatorSize, Dummy);
 				bAllocSuccess = false;
 			}
 
@@ -313,10 +314,7 @@ FHVPT_Reservoir ComputeInitialSample(
 				{
 					SurfaceBounce.Bounces[i] = ExtraBounces[i];
 				}
-				RWDeferredSurfaceBounces[AllocatedIndex] = SurfaceBounce;
-
-				// This reservoir should not contribute toward the weight in the combined reservoir, because it will be considered in a deferred pass
-				OutReservoir.M = 0.0f;
+				RWDeferredSurfaceBounces[SurfaceBounceAllocatorSize * CandidateIndex + AllocatedIndex] = SurfaceBounce;
 			}
 			else // If failed to allocate space then just trace the ray straight away
 #endif
@@ -422,7 +420,7 @@ void ReSTIRCandidateGeneration_Main(uint2 PixelCoord, uint ReservoirIndex)
 	RandomSequence_Initialize(RandSequence, LinearPixelIndex, TemporalSeed);
 
 	// Create initial samples
-	for (uint m = 0; m < NumInitialCandidates; m++)
+	for (uint CandidateIndex = 0; CandidateIndex < NumInitialCandidates; CandidateIndex++)
 	{
 #if MULTIPLE_BOUNCES
 		FHVPT_Bounce OutBounces[MAX_EXTRA_BOUNCES];
@@ -430,6 +428,7 @@ void ReSTIRCandidateGeneration_Main(uint2 PixelCoord, uint ReservoirIndex)
 
 		FHVPT_Reservoir OutReservoir = ComputeInitialSample(
 			ReservoirIndex,
+			CandidateIndex,
 			PrimaryRay, 
 #if MULTIPLE_BOUNCES
 			OutBounces, 
@@ -508,8 +507,6 @@ StructuredBuffer<FHVPT_DeferredSurfaceBounce> DeferredSurfaceBounces;
 // Deferred surface bounces always use indirect dispatch
 RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateSurfaceBouncesRGS)
 {
-	float3 Debug = 0.0f;
-
 	uint SurfaceBounceIndex = DispatchRaysIndex().x;
 	FHVPT_DeferredSurfaceBounce SurfaceBounce = DeferredSurfaceBounces[SurfaceBounceIndex];
 	uint ReservoirIndex = SurfaceBounce.ReservoirIndex;
@@ -517,7 +514,6 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateSurfaceBouncesRGS)
 	RandomSequence RandSequence = { SurfaceBounce.RandomSequenceState.x, SurfaceBounce.RandomSequenceState.y };
 
 	FHVPT_Reservoir OutReservoir = HVPT_CreateNewReservoir();
-	OutReservoir.M = 1;
 	OutReservoir.SetReservoirIndex(ReservoirIndex);
 	OutReservoir.SetDepth(SurfaceBounce.Depth);
 	OutReservoir.SetNumExtraBounces(SurfaceBounce.NumExtraBounces);
@@ -565,11 +561,8 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateSurfaceBouncesRGS)
 	// Combine the reservoir created from surface with the one stored for this pixel
 	FHVPT_Reservoir CombinedReservoir = RWCurrentReservoirs[ReservoirIndex];
 	bool bSelected = HVPT_SimpleResampleStep<false>(OutReservoir, CombinedReservoir, RandomSequence_GenerateSample1D(RandSequence));
-	CombinedReservoir.M = 1;
 
 	RWCurrentReservoirs[ReservoirIndex] = CombinedReservoir;
-
-	Debug = bSelected;
 
 #if MULTIPLE_BOUNCES // For surface hits, should always be multiple bounces
 	if (bSelected)
@@ -580,14 +573,6 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateSurfaceBouncesRGS)
 		{
 			RWExtraBounces[ExtraBounceIndex + i] = SurfaceBounce.Bounces[i];
 		}
-	}
-#endif
-
-#if DEBUG_OUTPUT_ENABLED
-	if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_CUSTOM)
-	{
-		//uint2 PixelCoord = HVPT_GetPixelCoord(ReservoirIndex);
-		//RWDebugTexture[PixelCoord] = Debug;
 	}
 #endif
 }

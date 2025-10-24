@@ -43,7 +43,7 @@ static TAutoConsoleVariable<bool> CVarHVPTReSTIRDeferSurfaceBounces(
 
 static TAutoConsoleVariable<int32> CVarHVPTReSTIRDeferredBounceBufferSize(
 	TEXT("r.HVPT.ReSTIR.DeferredBounceBufferSize"),
-	1'000'000,
+	500'000,
 	TEXT("Amount of space allocated for deferred bounces, in number of bounces. Any required bounces that do not fit in buffer will be traced immediately and not deferred."),
 	ECVF_RenderThreadSafe
 );
@@ -55,6 +55,20 @@ static bool DeferSurfaceHits()
 
 
 #if RHI_RAYTRACING
+
+struct FHVPT_DeferredSurfaceBounce
+{
+	// TODO: It would be nice to unify this definition with that in CandidateGeneration.usf - the blocker being I cannot use kReSTIRMaxBounces in HVPTDefinitions.h
+	FUintPoint RandomSequenceState;
+	uint32 ReservoirIndex;
+	FVector3f Origin;
+	FVector2f Direction;
+	float Depth;
+	uint32 NumExtraBounces;
+	float PathPDF;
+	float PathPHat;
+	FHVPT_Bounce Bounces[kReSTIRMaxBounces - 1];
+};
 
 
 // Extracted into its own struct to be able to construct it once and re-use for each pass
@@ -621,9 +635,11 @@ void HVPT::RenderWithReSTIRPathTracing(
 	{
 		RDG_EVENT_SCOPE(GraphBuilder, "HVPT: ReSTIR (Candidate Generation)");
 
+		uint32 NumCandidates = HVPT::GetNumInitialCandidates();
+
 		// For indirect surface bounces
 		bool bDeferSurfaceHits = DeferSurfaceHits();
-		uint32 MaxDeferredSurfaceBounces = CVarHVPTReSTIRDeferredBounceBufferSize.GetValueOnRenderThread();
+		uint32 MaxDeferredSurfaceBouncesPerCandidate = CVarHVPTReSTIRDeferredBounceBufferSize.GetValueOnRenderThread();
 
 		if (bDeferSurfaceHits && !CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread())
 		{
@@ -635,22 +651,10 @@ void HVPT::RenderWithReSTIRPathTracing(
 		if (bDeferSurfaceHits)
 		{
 			DeferredSurfaceBounceAllocator = GraphBuilder.CreateBuffer(
-				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 1), TEXT("HVPT.ReSTIR.DeferredSurfaceBounceAllocator"));
-			struct FHVPT_DeferredSurfaceBounce
-			{
-				// TODO: It would be nice to unify this definition with that in CandidateGeneration.usf - the blocker being I cannot use kReSTIRMaxBounces in HVPTDefinitions.h
-				FUintPoint RandomSequenceState;
-				uint32 ReservoirIndex;
-				FVector3f Origin;
-				FVector2f Direction;
-				float Depth;
-				uint32 NumExtraBounces;
-				float PathPDF;
-				float PathPHat;
-				FHVPT_Bounce Bounces[kReSTIRMaxBounces - 1];
-			};
+				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), NumCandidates), TEXT("HVPT.ReSTIR.DeferredSurfaceBounceAllocator"));
+			
 			DeferredSurfaceBounces = GraphBuilder.CreateBuffer(
-				FRDGBufferDesc::CreateStructuredDesc(sizeof(FHVPT_DeferredSurfaceBounce), MaxDeferredSurfaceBounces), TEXT("HVPT.ReSTIR.DeferredSurfaceBounces"));
+				FRDGBufferDesc::CreateStructuredDesc(sizeof(FHVPT_DeferredSurfaceBounce), MaxDeferredSurfaceBouncesPerCandidate * NumCandidates), TEXT("HVPT.ReSTIR.DeferredSurfaceBounces"));
 
 			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(DeferredSurfaceBounceAllocator), 0);
 		}
@@ -662,7 +666,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 			PassParameters->SceneDepthTexture_Copy = GraphBuilder.CreateSRV(State.DepthBufferCopy);
 			PassParameters->FeatureTexture = GraphBuilder.CreateSRV(State.FeatureTexture);
 
-			PassParameters->NumInitialCandidates = HVPT::GetNumInitialCandidates();
+			PassParameters->NumInitialCandidates = NumCandidates;
 			PassParameters->bUseShadowTermForCandidateGeneration = HVPT::GetUseShadowTermForCandidateGeneration();
 
 			PassParameters->RWCurrentReservoirs = GraphBuilder.CreateUAV(ReservoirsA);
@@ -670,7 +674,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 			if (bDeferSurfaceHits)
 			{
-				PassParameters->SurfaceBounceAllocatorSize = MaxDeferredSurfaceBounces;
+				PassParameters->SurfaceBounceAllocatorSize = MaxDeferredSurfaceBouncesPerCandidate;
 				PassParameters->RWDeferredSurfaceBounceAllocator = GraphBuilder.CreateUAV(DeferredSurfaceBounceAllocator);
 				PassParameters->RWDeferredSurfaceBounces = GraphBuilder.CreateUAV(DeferredSurfaceBounces);
 			}
@@ -690,31 +694,37 @@ void HVPT::RenderWithReSTIRPathTracing(
 		}
 		if (bDeferSurfaceHits)
 		{
-			// Setup indirect arguments
-			FRDGBufferRef DispatchDeferredSurfaceBounceIndirectArguments = FComputeShaderUtils::AddIndirectArgsSetupCsPass1D(
-				GraphBuilder, ViewInfo.FeatureLevel, DeferredSurfaceBounceAllocator, TEXT("HVPT.ReSTIR.DeferredSurfaceBouncesIndirectArguments"), 1);
+			for (uint32 DeferredSurfaceBouncePass = 0; DeferredSurfaceBouncePass < NumCandidates; DeferredSurfaceBouncePass++)
+			{
+				// Setup indirect arguments
+				FRDGBufferRef DispatchDeferredSurfaceBounceIndirectArguments = FComputeShaderUtils::AddIndirectArgsSetupCsPass1D(
+					GraphBuilder, ViewInfo.FeatureLevel, DeferredSurfaceBounceAllocator, TEXT("HVPT.ReSTIR.DeferredSurfaceBouncesIndirectArguments"), 1, DeferredSurfaceBouncePass);
 
-			FReSTIRCandidateEvaluateSurfaceBouncesRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FParameters>();
-			PopulateCommonParameters(&PassParameters->Common);
-			PassParameters->Common.IndirectArgs = DispatchDeferredSurfaceBounceIndirectArguments;
+				FReSTIRCandidateEvaluateSurfaceBouncesRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FParameters>();
+				PopulateCommonParameters(&PassParameters->Common);
+				PassParameters->Common.IndirectArgs = DispatchDeferredSurfaceBounceIndirectArguments;
 
-			PassParameters->bUseShadowTermForCandidateGeneration = HVPT::GetUseShadowTermForCandidateGeneration();
-			PassParameters->DeferredSurfaceBounces = GraphBuilder.CreateSRV(DeferredSurfaceBounces);
-			PassParameters->RWCurrentReservoirs = GraphBuilder.CreateUAV(ReservoirsA);
-			PassParameters->RWExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesA);
+				PassParameters->bUseShadowTermForCandidateGeneration = HVPT::GetUseShadowTermForCandidateGeneration();
+				PassParameters->DeferredSurfaceBounces = GraphBuilder.CreateSRV(
+					FRDGBufferSRVDesc{ DeferredSurfaceBounces,
+					DeferredSurfaceBouncePass * MaxDeferredSurfaceBouncesPerCandidate * static_cast<uint32>(sizeof(FHVPT_DeferredSurfaceBounce)),
+					MaxDeferredSurfaceBouncesPerCandidate });
+				PassParameters->RWCurrentReservoirs = GraphBuilder.CreateUAV(ReservoirsA);
+				PassParameters->RWExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesA);
 
-			FReSTIRCandidateEvaluateSurfaceBouncesRGS::FPermutationDomain Permutation;
-			Permutation.Set<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FUseSER>(HVPT::ShouldUseSER());
-			Permutation.Set<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FDebugOutputEnabled>(State.DebugFlags& HVPT_DEBUG_FLAG_ENABLE);
-			AddRaytracingPass<FReSTIRCandidateEvaluateSurfaceBouncesRGS>(
-				GraphBuilder,
-				RDG_EVENT_NAME("ReSTIRCandidateEvaluateSurfaceBounces"),
-				ViewInfo,
-				State,
-				PassParameters,
-				Permutation,
-				DispatchDeferredSurfaceBounceIndirectArguments
-			);
+				FReSTIRCandidateEvaluateSurfaceBouncesRGS::FPermutationDomain Permutation;
+				Permutation.Set<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FUseSER>(HVPT::ShouldUseSER());
+				Permutation.Set<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FDebugOutputEnabled>(State.DebugFlags& HVPT_DEBUG_FLAG_ENABLE);
+				AddRaytracingPass<FReSTIRCandidateEvaluateSurfaceBouncesRGS>(
+					GraphBuilder,
+					RDG_EVENT_NAME("ReSTIRCandidateEvaluateSurfaceBounces(n=%d)", DeferredSurfaceBouncePass),
+					ViewInfo,
+					State,
+					PassParameters,
+					Permutation,
+					DispatchDeferredSurfaceBounceIndirectArguments
+				);
+			}
 		}
 		if (CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread())
 		{
