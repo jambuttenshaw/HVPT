@@ -30,9 +30,28 @@ static TAutoConsoleVariable<bool> CVarHVPTReSTIRUseDispatchIndirect(
 static TAutoConsoleVariable<bool> CVarHVPTReSTIRDeferEvaluateCandidateF(
 	TEXT("r.HVPT.ReSTIR.DeferEvaluateCandidateF"),
 	true,
-	TEXT("Defers evaluating candidate path contribution to a separate path to help reduce divergence."),
+	TEXT("Defers evaluating candidate path contribution to a separate path to help reduce thread divergence."),
 	ECVF_RenderThreadSafe
 );
+
+static TAutoConsoleVariable<bool> CVarHVPTReSTIRDeferSurfaceBounces(
+	TEXT("r.HVPT.ReSTIR.DeferSurfaceBounces"),
+	true,
+	TEXT("Defers tracing rays into scene for surface candidates until a separate pass to help reduce thread divergence."),
+	ECVF_RenderThreadSafe
+);
+
+static TAutoConsoleVariable<int32> CVarHVPTReSTIRDeferredBounceBufferSize(
+	TEXT("r.HVPT.ReSTIR.DeferredBounceBufferSize"),
+	1'000'000,
+	TEXT("Amount of space allocated for deferred bounces, in number of bounces. Any required bounces that do not fit in buffer will be traced immediately and not deferred."),
+	ECVF_RenderThreadSafe
+);
+
+static bool DeferSurfaceHits()
+{
+	return (HVPT::GetMaxBounces() > 1) && HVPT::UseSurfaceContributions() && CVarHVPTReSTIRDeferSurfaceBounces.GetValueOnRenderThread();
+}
 
 
 #if RHI_RAYTRACING
@@ -157,12 +176,14 @@ public:
 	SHADER_USE_ROOT_PARAMETER_STRUCT(FReSTIRCandidateGenerationRGS, FReSTIRBaseRGS);
 
 	class FDeferEvaluateF : SHADER_PERMUTATION_BOOL("DEFER_EVALUATE_F");
+	class FDeferSurfaceHits : SHADER_PERMUTATION_BOOL("DEFER_SURFACE_HITS");
 	using FPermutationDomain = TShaderPermutationDomain<FReSTIRBaseRGS::FMultipleBounces,
 														FReSTIRBaseRGS::FUseSurfaceContributions,
 														FReSTIRBaseRGS::FUseSER,
 														FReSTIRBaseRGS::FUseDispatchIndirect,
 														FReSTIRBaseRGS::FDebugOutputEnabled,
-														FDeferEvaluateF>;
+														FDeferEvaluateF,
+														FDeferSurfaceHits>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
@@ -177,10 +198,45 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Reservoir>, RWCurrentReservoirs)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Bounce>, RWExtraBounces)
 
+		// Deferred surface bounces
+		SHADER_PARAMETER(uint32, SurfaceBounceAllocatorSize)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWDeferredSurfaceBounceAllocator)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_DeferredSurfaceBounce>, RWDeferredSurfaceBounces)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
 IMPLEMENT_GLOBAL_SHADER(FReSTIRCandidateGenerationRGS, "/Plugin/HVPT/Private/ReSTIR/CandidateGeneration.usf", "ReSTIRCandidateGenerationRGS", SF_RayGen)
+
+class FReSTIRCandidateEvaluateSurfaceBouncesRGS : public FReSTIRBaseRGS
+{
+public:
+	DECLARE_GLOBAL_SHADER(FReSTIRCandidateEvaluateSurfaceBouncesRGS);
+	SHADER_USE_ROOT_PARAMETER_STRUCT(FReSTIRCandidateEvaluateSurfaceBouncesRGS, FReSTIRBaseRGS);
+
+	using FPermutationDomain = TShaderPermutationDomain<FReSTIRBaseRGS::FUseSER,
+														FReSTIRBaseRGS::FDebugOutputEnabled>;
+
+	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
+		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
+
+		SHADER_PARAMETER(uint32, bUseShadowTermForCandidateGeneration)
+
+		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_DeferredSurfaceBounce>, DeferredSurfaceBounces)
+
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Reservoir>, RWCurrentReservoirs)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Bounce>, RWExtraBounces)
+	END_SHADER_PARAMETER_STRUCT()
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FReSTIRBaseRGS::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+		OutEnvironment.SetDefine("MULTIPLE_BOUNCES", true);
+		OutEnvironment.SetDefine("USE_SURFACE_CONTRIBUTIONS", true);
+		OutEnvironment.SetDefine("DEFER_SURFACE_HITS", true);
+	}
+};
+
+IMPLEMENT_GLOBAL_SHADER(FReSTIRCandidateEvaluateSurfaceBouncesRGS, "/Plugin/HVPT/Private/ReSTIR/CandidateGeneration.usf", "ReSTIRCandidateEvaluateSurfaceBouncesRGS", SF_RayGen)
 
 class FReSTIRCandidateEvaluateFRGS : public FReSTIRBaseRGS
 {
@@ -301,31 +357,47 @@ public:
 IMPLEMENT_GLOBAL_SHADER(FReSTIRDebugVisualizationCS, "/Plugin/HVPT/Private/ReSTIR/ReservoirVisualization.usf", "ReSTIRDebugVisualizationCS", SF_Compute);
 
 
+template<typename Shader>
+typename Shader::FPermutationDomain CreatePermutation(const FHVPTViewState& State)
+{
+	typename Shader::FPermutationDomain Permutation = typename Shader::FPermutationDomain{};
+	Permutation.Set<typename Shader::FMultipleBounces>(HVPT::GetMaxBounces() > 1);
+	Permutation.Set<typename Shader::FUseSurfaceContributions>(HVPT::UseSurfaceContributions());
+	//Permutation.Set<typename Shader::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
+	Permutation.Set<typename Shader::FUseSER>(HVPT::ShouldUseSER());
+	Permutation.Set<typename Shader::FUseDispatchIndirect>(CVarHVPTReSTIRUseDispatchIndirect.GetValueOnRenderThread());
+	Permutation.Set<typename Shader::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
+	return Permutation;
+}
+
 void HVPT::PrepareRaytracingShadersReSTIR(const FViewInfo& View, const FHVPTViewState& State, TArray<FRHIRayTracingShader*>& OutRayGenShaders)
 {
 	auto ShaderMap = GetGlobalShaderMap(View.GetShaderPlatform());
 
-	auto AddShader = [&]<typename T>(typename T::FPermutationDomain Permutation = typename T::FPermutationDomain{})
+	auto AddShader = [&]<typename T>(typename T::FPermutationDomain Permutation)
 	{
-		Permutation.Set<typename T::FMultipleBounces>(HVPT::GetMaxBounces() > 1);
-		Permutation.Set<typename T::FUseSurfaceContributions>(HVPT::UseSurfaceContributions());
-		//Permutation.Set<typename T::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
-		Permutation.Set<typename T::FUseSER>(HVPT::ShouldUseSER());
-		Permutation.Set<typename T::FUseDispatchIndirect>(CVarHVPTReSTIRUseDispatchIndirect.GetValueOnRenderThread());
-		Permutation.Set<typename T::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 		OutRayGenShaders.Add(ShaderMap->GetShader<T>(Permutation).GetRayTracingShader());
 	};
 
 	// AddShader<T>() does not compile
 	{
-		FReSTIRCandidateGenerationRGS::FPermutationDomain Permutation;
+		FReSTIRCandidateGenerationRGS::FPermutationDomain Permutation = CreatePermutation<FReSTIRCandidateGenerationRGS>(State);
 		Permutation.Set<FReSTIRCandidateGenerationRGS::FDeferEvaluateF>(CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread());
+		Permutation.Set<FReSTIRCandidateGenerationRGS::FDeferSurfaceHits>(DeferSurfaceHits());
 		AddShader.template operator()<FReSTIRCandidateGenerationRGS>(Permutation);
 	}
-	AddShader.template operator()<FReSTIRCandidateEvaluateFRGS>();
-	AddShader.template operator()<FReSTIRTemporalReuseRGS>();
-	AddShader.template operator()<FReSTIRSpatialReuseRGS>();
-	AddShader.template operator()<FReSTIRFinalShadingRGS>();
+	if (DeferSurfaceHits())
+	{
+		FReSTIRCandidateEvaluateSurfaceBouncesRGS::FPermutationDomain Permutation;
+		Permutation.Set<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FUseSER>(HVPT::ShouldUseSER());
+		Permutation.Set<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
+		OutRayGenShaders.Add(ShaderMap->GetShader<FReSTIRCandidateEvaluateSurfaceBouncesRGS>(Permutation).GetRayTracingShader());
+	}
+	if (CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread())
+		AddShader.template operator()<FReSTIRCandidateEvaluateFRGS>(CreatePermutation<FReSTIRCandidateEvaluateFRGS>(State));
+	AddShader.template operator()<FReSTIRTemporalReuseRGS>(CreatePermutation<FReSTIRTemporalReuseRGS>(State));
+	AddShader.template operator()<FReSTIRSpatialReuseRGS>(CreatePermutation<FReSTIRSpatialReuseRGS>(State));
+	AddShader.template operator()<FReSTIRFinalShadingRGS>(CreatePermutation<FReSTIRFinalShadingRGS>(State));
 }
 
 
@@ -340,7 +412,7 @@ void AddRaytracingPass(
 	uint32 ArgumentOffset = 0
 )
 {
-	typename Shader::FPermutationDomain Permutation;
+	typename Shader::FPermutationDomain Permutation = CreatePermutation<Shader>(State);
 	AddRaytracingPass<Shader>(GraphBuilder, std::move(EventName), View, State, PassParameters, Permutation, ArgumentBuffer, ArgumentOffset);
 }
 
@@ -356,16 +428,9 @@ void AddRaytracingPass(
 	uint32 ArgumentOffset = 0
 )
 {
+	bool bDispatchIndirect = ArgumentBuffer != nullptr;
 	FRHIUniformBuffer* SceneUniformBuffer = ViewInfo.GetSceneUniforms().GetBufferRHI(GraphBuilder);
-	bool bDispatchIndirect = CVarHVPTReSTIRUseDispatchIndirect.GetValueOnRenderThread();
 
-	// Set common permutation vector dimensions here
-	Permutation.Set<typename Shader::FMultipleBounces>(HVPT::GetMaxBounces() > 1);
-	Permutation.Set<typename Shader::FUseSurfaceContributions>(HVPT::UseSurfaceContributions());
-	//Permutation.Set<typename Shader::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == HVPT::EFogCompositionMode::PostAndPathTracing);
-	Permutation.Set<typename Shader::FUseSER>(HVPT::ShouldUseSER());
-	Permutation.Set<typename Shader::FUseDispatchIndirect>(bDispatchIndirect);
-	Permutation.Set<typename Shader::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 	TShaderMapRef<Shader> RayGenShader(ViewInfo.ShaderMap, Permutation);
 
 	GraphBuilder.AddPass(
@@ -484,17 +549,19 @@ void HVPT::RenderWithReSTIRPathTracing(
 	);
 	FHVPT_PathTracingFogParameters FogParameters = HVPT::Private::PrepareFogParameters(ViewInfo, Scene.ExponentialFogs[0]);
 
-	FRDGBufferRef DispatchRaysIndirectArgumentBuffer;
-	FRDGBufferRef ReservoirIndicesBuffer;
+	
+	FRDGBufferRef DispatchRaysIndirectArgumentBuffer = nullptr;
+	FRDGBufferRef ReservoirIndicesBuffer = nullptr;
 	if (CVarHVPTReSTIRUseDispatchIndirect.GetValueOnRenderThread())
 	{
+		RDG_EVENT_SCOPE(GraphBuilder, "HVPT: ReSTIR (Dispatcher)");
+
 		DispatchRaysIndirectArgumentBuffer = GraphBuilder.CreateBuffer(
 			FRDGBufferDesc::CreateIndirectDesc<FRHIDispatchIndirectParameters>(), TEXT("HVPT.ReSTIR.DispatchRaysIndirectArgs"));
 		ReservoirIndicesBuffer = GraphBuilder.CreateBuffer(
 			FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), Extent.X * Extent.Y), TEXT("HVPT.ReSTIR.ReservoirIndices"));
 
 		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(DispatchRaysIndirectArgumentBuffer), 0);
-
 		// Execute dispatcher
 		{
 			FReSTIRDispatchRaysDispatcherCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRDispatchRaysDispatcherCS::FParameters>();
@@ -553,6 +620,41 @@ void HVPT::RenderWithReSTIRPathTracing(
 	// Candidate Generation
 	{
 		RDG_EVENT_SCOPE(GraphBuilder, "HVPT: ReSTIR (Candidate Generation)");
+
+		// For indirect surface bounces
+		bool bDeferSurfaceHits = DeferSurfaceHits();
+		uint32 MaxDeferredSurfaceBounces = CVarHVPTReSTIRDeferredBounceBufferSize.GetValueOnRenderThread();
+
+		if (bDeferSurfaceHits && !CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread())
+		{
+			UE_LOG(LogHVPT, Error, TEXT("When using r.HVPT.ReSTIR.DeferSurfaceBounces, you must also enable r.HVPT.ReSTIR.DeferEvaluateCandidateF"));
+		}
+
+		FRDGBufferRef DeferredSurfaceBounceAllocator = nullptr;
+		FRDGBufferRef DeferredSurfaceBounces = nullptr;
+		if (bDeferSurfaceHits)
+		{
+			DeferredSurfaceBounceAllocator = GraphBuilder.CreateBuffer(
+				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 1), TEXT("HVPT.ReSTIR.DeferredSurfaceBounceAllocator"));
+			struct FHVPT_DeferredSurfaceBounce
+			{
+				// TODO: It would be nice to unify this definition with that in CandidateGeneration.usf - the blocker being I cannot use kReSTIRMaxBounces in HVPTDefinitions.h
+				FUintPoint RandomSequenceState;
+				uint32 ReservoirIndex;
+				FVector3f Origin;
+				FVector2f Direction;
+				float Depth;
+				uint32 NumExtraBounces;
+				float PathPDF;
+				float PathPHat;
+				FHVPT_Bounce Bounces[kReSTIRMaxBounces - 1];
+			};
+			DeferredSurfaceBounces = GraphBuilder.CreateBuffer(
+				FRDGBufferDesc::CreateStructuredDesc(sizeof(FHVPT_DeferredSurfaceBounce), MaxDeferredSurfaceBounces), TEXT("HVPT.ReSTIR.DeferredSurfaceBounces"));
+
+			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(DeferredSurfaceBounceAllocator), 0);
+		}
+
 		{
 			FReSTIRCandidateGenerationRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRCandidateGenerationRGS::FParameters>();
 			PopulateCommonParameters(&PassParameters->Common);
@@ -566,8 +668,16 @@ void HVPT::RenderWithReSTIRPathTracing(
 			PassParameters->RWCurrentReservoirs = GraphBuilder.CreateUAV(ReservoirsA);
 			PassParameters->RWExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesA);
 
-			FReSTIRCandidateGenerationRGS::FPermutationDomain Permutation;
+			if (bDeferSurfaceHits)
+			{
+				PassParameters->SurfaceBounceAllocatorSize = MaxDeferredSurfaceBounces;
+				PassParameters->RWDeferredSurfaceBounceAllocator = GraphBuilder.CreateUAV(DeferredSurfaceBounceAllocator);
+				PassParameters->RWDeferredSurfaceBounces = GraphBuilder.CreateUAV(DeferredSurfaceBounces);
+			}
+
+			FReSTIRCandidateGenerationRGS::FPermutationDomain Permutation = CreatePermutation<FReSTIRCandidateGenerationRGS>(State);
 			Permutation.Set<FReSTIRCandidateGenerationRGS::FDeferEvaluateF>(CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread());
+			Permutation.Set<FReSTIRCandidateGenerationRGS::FDeferSurfaceHits>(DeferSurfaceHits());
 			AddRaytracingPass<FReSTIRCandidateGenerationRGS>(
 				GraphBuilder,
 				RDG_EVENT_NAME("ReSTIRCandidateGeneration"),
@@ -576,6 +686,34 @@ void HVPT::RenderWithReSTIRPathTracing(
 				PassParameters,
 				Permutation,
 				DispatchRaysIndirectArgumentBuffer
+			);
+		}
+		if (bDeferSurfaceHits)
+		{
+			// Setup indirect arguments
+			FRDGBufferRef DispatchDeferredSurfaceBounceIndirectArguments = FComputeShaderUtils::AddIndirectArgsSetupCsPass1D(
+				GraphBuilder, ViewInfo.FeatureLevel, DeferredSurfaceBounceAllocator, TEXT("HVPT.ReSTIR.DeferredSurfaceBouncesIndirectArguments"), 1);
+
+			FReSTIRCandidateEvaluateSurfaceBouncesRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FParameters>();
+			PopulateCommonParameters(&PassParameters->Common);
+			PassParameters->Common.IndirectArgs = DispatchDeferredSurfaceBounceIndirectArguments;
+
+			PassParameters->bUseShadowTermForCandidateGeneration = HVPT::GetUseShadowTermForCandidateGeneration();
+			PassParameters->DeferredSurfaceBounces = GraphBuilder.CreateSRV(DeferredSurfaceBounces);
+			PassParameters->RWCurrentReservoirs = GraphBuilder.CreateUAV(ReservoirsA);
+			PassParameters->RWExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesA);
+
+			FReSTIRCandidateEvaluateSurfaceBouncesRGS::FPermutationDomain Permutation;
+			Permutation.Set<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FUseSER>(HVPT::ShouldUseSER());
+			Permutation.Set<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FDebugOutputEnabled>(State.DebugFlags& HVPT_DEBUG_FLAG_ENABLE);
+			AddRaytracingPass<FReSTIRCandidateEvaluateSurfaceBouncesRGS>(
+				GraphBuilder,
+				RDG_EVENT_NAME("ReSTIRCandidateEvaluateSurfaceBounces"),
+				ViewInfo,
+				State,
+				PassParameters,
+				Permutation,
+				DispatchDeferredSurfaceBounceIndirectArguments
 			);
 		}
 		if (CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread())

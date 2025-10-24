@@ -21,6 +21,10 @@ StructuredBuffer<uint> ReservoirIndices;
 
 RWTexture2D<float3> RWRadianceTexture;
 
+// Debug tools
+uint DebugFlags;
+RWTexture2D<float3> RWDebugTexture;
+
 
 void ReSTIRFinalShading_Main(uint2 PixelCoord, uint ReservoirIndex)
 {
@@ -50,13 +54,22 @@ void ReSTIRFinalShading_Main(uint2 PixelCoord, uint ReservoirIndex)
 		}
 #endif
 
-		Radiance = HVPT_EvaluateF<SHADING_QUALITY_FINAL_SHADING>(Reservoir,
+		float3 Debug = 0.0f;
+		Radiance = HVPT_EvaluateF_Debug<SHADING_QUALITY_FINAL_SHADING>(Reservoir,
 #if MULTIPLE_BOUNCES
 			Bounces,
 #endif
-			Ray, RandSequence);
+			Ray, RandSequence, Debug);
 
 		float W = Reservoir.P_y == 0.0 ? 1.f : Reservoir.RunningSum / (Reservoir.P_y * Reservoir.M);
+
+#if DEBUG_OUTPUT_ENABLED && MULTIPLE_BOUNCES
+		if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_CUSTOM)
+		{
+			bool bSurfaceBounce = HVPT_DecodeBounce(Bounces[Reservoir.GetNumExtraBounces() - 1]).w == POSITIVE_INFINITY;
+			RWDebugTexture[PixelCoord] = Debug;
+		}
+#endif
 
 		Radiance *= W;
 	}

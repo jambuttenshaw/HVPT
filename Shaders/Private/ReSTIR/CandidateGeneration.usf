@@ -20,6 +20,10 @@
 #define USE_SURFACE_CONTRIBUTIONS true
 #endif
 
+#ifndef DEFER_SURFACE_HITS
+#define DEFER_SURFACE_HITS true
+#endif
+
 // Uses a copy of the scene depth, that was made before writing HVPT into it
 Texture2D<float> SceneDepthTexture_Copy;
 Texture2D<float2> FeatureTexture;
@@ -38,6 +42,24 @@ StructuredBuffer<uint> ReservoirIndices;
 uint DebugFlags;
 RWTexture2D<float3> RWDebugTexture;
 
+// Deferred surface bounces are only used in multi-bounce setups with surface contributions enabled
+#if MULTIPLE_BOUNCES && USE_SURFACE_CONTRIBUTIONS && DEFER_SURFACE_HITS
+struct FHVPT_DeferredSurfaceBounce
+{
+	uint2 RandomSequenceState;
+	uint ReservoirIndex;
+	float3 Origin;
+	float2 Direction;
+	float Depth;
+	uint NumExtraBounces;
+	float PathPDF;
+	float PathPHat;
+	FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES];
+};
+uint SurfaceBounceAllocatorSize;
+RWStructuredBuffer<uint> RWDeferredSurfaceBounceAllocator;
+RWStructuredBuffer<FHVPT_DeferredSurfaceBounce> RWDeferredSurfaceBounces;
+#endif
 
 #if USE_SURFACE_CONTRIBUTIONS
 float3 SampleDirectLightingSurface(
@@ -104,7 +126,12 @@ float3 SampleDirectLighting(
 }
 
 
+/////////////////////////////////////////
+// --- GENERATE INITIAL CANDIDATES --- //
+/////////////////////////////////////////
+
 FHVPT_Reservoir ComputeInitialSample(
+	uint ReservoirIndex,
 	FRayDesc Ray,
 #if MULTIPLE_BOUNCES
 	inout FHVPT_Bounce ExtraBounces[MAX_EXTRA_BOUNCES],
@@ -254,48 +281,88 @@ FHVPT_Reservoir ComputeInitialSample(
 #if MULTIPLE_BOUNCES && USE_SURFACE_CONTRIBUTIONS
 		else if (Bounce > 0)
 		{
-			FRayDesc SurfaceRay = Ray;
-			SurfaceRay.TMin = 0.0f;
-			SurfaceRay.TMax = POSITIVE_INFINITY;
-			FMaterialClosestHitPayload HitInfo = HVPT_TraceMaterialRay(TLAS, SurfaceRay);
+#if DEFER_SURFACE_HITS
+			// Try to allocate space to record this surface hit
+			uint AllocatedIndex;
+			bool bAllocSuccess = true;
 
-			if (HitInfo.IsHit())
+			InterlockedAdd(RWDeferredSurfaceBounceAllocator[0], 1, AllocatedIndex);
+			if (AllocatedIndex >= SurfaceBounceAllocatorSize)
 			{
-				FPathTracingPayload Payload = HVPT_CreateSurfaceHitPayload(HitInfo);
-
-				// Hit surface - find candidate paths that either sample emissive surface or sample direct light that bounces off surface
-				// In path evaluation, surface hit is denoted by Distance == POSITIVE_INFINITY
-
-				float3 Albedo = Payload.GetBaseColor();
-				float3 OneMinusAlbedo = 1.0f - Albedo;
-
-				float OutLightPDF = 0.0f;
-				uint LightId = -1;
-				float3 Ld = SampleDirectLightingSurface(
-					Ray, Payload, RandSequence, OutLightPDF, LightId, OutReservoir.LightSample
-				);
-				float3 Le = Payload.Radiance;
-
-				// Perform RIS step between emission and in-scattering
-				float EmissionWeight = Luminance(OneMinusAlbedo * Le);
-				float EmissionRatio = EmissionWeight / (EmissionWeight + Luminance(Albedo * Ld));
-				if (isnan(EmissionRatio))
-					EmissionRatio = 0.0f;
-					
-				bool bEmissionPath = RandomSequence_GenerateSample1D(RandSequence) < EmissionRatio;
-				PathPDF *= bEmissionPath ? EmissionRatio : OutLightPDF * (1.0f - EmissionRatio);
-
-				// Calculate target function for this sample
-				// If PDF is 0 then no problem - OutReservoir.RunningSum will be 0 and this reservoir will not be chosen
-				if (PathPDF > 0.0f)
-				{
-					OutReservoir.P_y = PathPHat * Luminance(OutReservoir.GetEmissionPath() ? Le : Ld * OutLightPDF);
-					OutReservoir.RunningSum = OutReservoir.P_y / PathPDF;
-					OutReservoir.SetEmissionPath(bEmissionPath);
-					OutReservoir.SetLightId(LightId);
-				}
+				// Declare surface bounces fully allocated
+				uint Dummy;
+				InterlockedExchange(RWDeferredSurfaceBounceAllocator[0], SurfaceBounceAllocatorSize, Dummy);
+				bAllocSuccess = false;
 			}
 
+			if (bAllocSuccess)
+			{
+				// Create a deferred surface hit to add to the buffer
+				FHVPT_DeferredSurfaceBounce SurfaceBounce = (FHVPT_DeferredSurfaceBounce)0;
+				SurfaceBounce.RandomSequenceState.x = RandSequence.SampleIndex;
+				SurfaceBounce.RandomSequenceState.y = RandSequence.SampleSeed;
+				SurfaceBounce.ReservoirIndex = ReservoirIndex;
+				SurfaceBounce.Origin = Ray.Origin;
+				SurfaceBounce.Direction = UnitVectorToOctahedron(Ray.Direction);
+				SurfaceBounce.Depth = OutReservoir.GetDepth();
+				SurfaceBounce.NumExtraBounces = OutReservoir.GetNumExtraBounces();
+				SurfaceBounce.PathPDF = PathPDF;
+				SurfaceBounce.PathPHat = PathPHat;
+				// Surface hits are only possible in a multiple bounce permutation, so don't need to #if for multiple bounces
+				for (uint i = 0; i < Bounce; i++)
+				{
+					SurfaceBounce.Bounces[i] = ExtraBounces[i];
+				}
+				RWDeferredSurfaceBounces[AllocatedIndex] = SurfaceBounce;
+
+				// This reservoir should not contribute toward the weight in the combined reservoir, because it will be considered in a deferred pass
+				OutReservoir.M = 0.0f;
+			}
+			else // If failed to allocate space then just trace the ray straight away
+#endif
+			{
+				FRayDesc SurfaceRay = Ray;
+				SurfaceRay.TMin = 0.0f;
+				SurfaceRay.TMax = POSITIVE_INFINITY;
+				FMaterialClosestHitPayload HitInfo = HVPT_TraceMaterialRay(TLAS, SurfaceRay);
+
+				if (HitInfo.IsHit())
+				{
+					FPathTracingPayload Payload = HVPT_CreateSurfaceHitPayload(HitInfo);
+
+					// Hit surface - find candidate paths that either sample emissive surface or sample direct light that bounces off surface
+					// In path evaluation, surface hit is denoted by Distance == POSITIVE_INFINITY
+
+					float3 Albedo = Payload.DiffuseColor;
+					float3 OneMinusAlbedo = 1.0f - Albedo;
+
+					float OutLightPDF = 0.0f;
+					uint LightId = -1;
+					float3 Ld = SampleDirectLightingSurface(
+					Ray, Payload, RandSequence, OutLightPDF, LightId, OutReservoir.LightSample
+				);
+					float3 Le = Payload.Radiance;
+
+					// Perform RIS step between emission and in-scattering
+					float EmissionWeight = Luminance(OneMinusAlbedo * Le);
+					float EmissionRatio = EmissionWeight / (EmissionWeight + Luminance(Albedo * Ld));
+					if (isnan(EmissionRatio))
+						EmissionRatio = 0.0f;
+					
+					bool bEmissionPath = RandomSequence_GenerateSample1D(RandSequence) < EmissionRatio;
+					PathPDF *= bEmissionPath ? EmissionRatio : OutLightPDF * (1.0f - EmissionRatio);
+
+					// Calculate target function for this sample
+					// If PDF is 0 then no problem - OutReservoir.RunningSum will be 0 and this reservoir will not be chosen
+					if (PathPDF > 0.0f)
+					{
+						OutReservoir.P_y = PathPHat * Luminance(bEmissionPath ? Le : Ld * OutLightPDF);
+						OutReservoir.RunningSum = OutReservoir.P_y / PathPDF;
+						OutReservoir.SetEmissionPath(bEmissionPath);
+						OutReservoir.SetLightId(LightId);
+					}
+				}
+			}
 			// Whether surface hit was encountered or not, we do not want to bounce the ray off of a surface
 			bHitEmpty = true;
 		}
@@ -361,7 +428,9 @@ void ReSTIRCandidateGeneration_Main(uint2 PixelCoord, uint ReservoirIndex)
 		FHVPT_Bounce OutBounces[MAX_EXTRA_BOUNCES];
 #endif
 
-		FHVPT_Reservoir OutReservoir = ComputeInitialSample(PrimaryRay, 
+		FHVPT_Reservoir OutReservoir = ComputeInitialSample(
+			ReservoirIndex,
+			PrimaryRay, 
 #if MULTIPLE_BOUNCES
 			OutBounces, 
 #endif
@@ -371,7 +440,7 @@ void ReSTIRCandidateGeneration_Main(uint2 PixelCoord, uint ReservoirIndex)
 #if MULTIPLE_BOUNCES
 		if (bSelected)
 		{
-			for (uint Bounce = 0; Bounce < FinalReservoir.GetNumExtraBounces(); Bounce++)
+			for (uint Bounce = 0; Bounce < OutReservoir.GetNumExtraBounces(); Bounce++)
 			{
 				FinalExtraBounces[Bounce] = OutBounces[Bounce];
 			}
@@ -427,6 +496,107 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 }
 #endif
 
+
+///////////////////////////////////////
+/// --- DEFERRED SURFACE BOUNCES --- //
+///////////////////////////////////////
+
+#if MULTIPLE_BOUNCES && USE_SURFACE_CONTRIBUTIONS && DEFER_SURFACE_HITS
+
+StructuredBuffer<FHVPT_DeferredSurfaceBounce> DeferredSurfaceBounces;
+
+// Deferred surface bounces always use indirect dispatch
+RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateSurfaceBouncesRGS)
+{
+	float3 Debug = 0.0f;
+
+	uint SurfaceBounceIndex = DispatchRaysIndex().x;
+	FHVPT_DeferredSurfaceBounce SurfaceBounce = DeferredSurfaceBounces[SurfaceBounceIndex];
+	uint ReservoirIndex = SurfaceBounce.ReservoirIndex;
+
+	RandomSequence RandSequence = { SurfaceBounce.RandomSequenceState.x, SurfaceBounce.RandomSequenceState.y };
+
+	FHVPT_Reservoir OutReservoir = HVPT_CreateNewReservoir();
+	OutReservoir.M = 1;
+	OutReservoir.SetReservoirIndex(ReservoirIndex);
+	OutReservoir.SetDepth(SurfaceBounce.Depth);
+	OutReservoir.SetNumExtraBounces(SurfaceBounce.NumExtraBounces);
+
+	FRayDesc SurfaceRay = HVPT_CreateRayDesc<false>(SurfaceBounce.Origin, OctahedronToUnitVector(SurfaceBounce.Direction), 0.0f, POSITIVE_INFINITY);
+	FMaterialClosestHitPayload HitInfo = HVPT_TraceMaterialRay(TLAS, SurfaceRay);
+	if (!HitInfo.IsHit())
+	{
+		return;
+	}
+	FPathTracingPayload Payload = HVPT_CreateSurfaceHitPayload(HitInfo);
+
+	// Hit surface - find candidate paths that either sample emissive surface or sample direct light that bounces off surface
+	// In path evaluation, surface hit is denoted by Distance == POSITIVE_INFINITY
+
+	float3 Albedo = Payload.DiffuseColor;
+	float3 OneMinusAlbedo = 1.0f - Albedo;
+
+	float OutLightPDF = 0.0f;
+	uint LightId = -1;
+	float3 Ld = SampleDirectLightingSurface(
+		SurfaceRay, Payload, RandSequence, OutLightPDF, LightId, OutReservoir.LightSample
+	);
+	float3 Le = Payload.Radiance;
+
+	// Perform RIS step between emission and in-scattering
+	float EmissionWeight = Luminance(OneMinusAlbedo * Le);
+	float EmissionRatio = EmissionWeight / (EmissionWeight + Luminance(Albedo * Ld));
+	if (isnan(EmissionRatio))
+		EmissionRatio = 0.0f;
+		
+	bool bEmissionPath = RandomSequence_GenerateSample1D(RandSequence) < EmissionRatio;
+	SurfaceBounce.PathPDF *= bEmissionPath ? EmissionRatio : OutLightPDF * (1.0f - EmissionRatio);
+
+	// Calculate target function for this sample
+	// If PDF is 0 then no problem - OutReservoir.RunningSum will be 0 and this reservoir will not be chosen
+	if (SurfaceBounce.PathPDF > 0.0f)
+	{
+		OutReservoir.P_y = SurfaceBounce.PathPHat * Luminance(bEmissionPath ? Le : Ld * OutLightPDF);
+		OutReservoir.RunningSum = OutReservoir.P_y / SurfaceBounce.PathPDF;
+		OutReservoir.SetEmissionPath(bEmissionPath);
+		OutReservoir.SetLightId(LightId);
+	}
+
+	// Combine the reservoir created from surface with the one stored for this pixel
+	FHVPT_Reservoir CombinedReservoir = RWCurrentReservoirs[ReservoirIndex];
+	bool bSelected = HVPT_SimpleResampleStep<false>(OutReservoir, CombinedReservoir, RandomSequence_GenerateSample1D(RandSequence));
+	CombinedReservoir.M = 1;
+
+	RWCurrentReservoirs[ReservoirIndex] = CombinedReservoir;
+
+	Debug = bSelected;
+
+#if MULTIPLE_BOUNCES // For surface hits, should always be multiple bounces
+	if (bSelected)
+	{
+		// Copy bounces over
+		uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(ReservoirIndex, 0);
+		for (uint i = 0; i < CombinedReservoir.GetNumExtraBounces(); i++)
+		{
+			RWExtraBounces[ExtraBounceIndex + i] = SurfaceBounce.Bounces[i];
+		}
+	}
+#endif
+
+#if DEBUG_OUTPUT_ENABLED
+	if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_CUSTOM)
+	{
+		//uint2 PixelCoord = HVPT_GetPixelCoord(ReservoirIndex);
+		//RWDebugTexture[PixelCoord] = Debug;
+	}
+#endif
+}
+
+#endif
+
+/////////////////////////////////
+// --- DEFERRED EVALUATE F --- //
+/////////////////////////////////
 
 StructuredBuffer<FHVPT_Bounce> ExtraBounces;
 
