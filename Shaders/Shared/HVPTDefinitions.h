@@ -84,6 +84,21 @@ struct FHVPT_Bounce
 };
 
 
+// TODO: A further optimization would be quantizing the directions and sorting the rays so similar directions are executed by nearby threads
+// TODO: Can do an indirection table where entries have their sort key in top 8(?) bits and index in bottom 24
+struct FHVPT_DeferredSurfaceBounce
+{
+	uint2 RandomSequenceState;
+	uint ReservoirIndex;	// TODO: can be 23 bits
+	float3 Origin;
+	float2 Direction;		// TODO: can be 16 bits per component
+	float Depth;			// TODO: can be 16 bits
+	uint NumExtraBounces;	// TODO: can be 3 bits
+	float PathPDF;
+	float PathPHat;
+};
+
+
 // Debug tools
 
 // Flags and view modes are packed together into a single uint
@@ -109,5 +124,6 @@ struct FHVPT_Bounce
 
 using FHVPT_Reservoir = UE::HLSL::FHVPT_Reservoir;
 using FHVPT_Bounce = UE::HLSL::FHVPT_Bounce;
+using FHVPT_DeferredSurfaceBounce = UE::HLSL::FHVPT_DeferredSurfaceBounce;
 
 #endif

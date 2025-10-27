@@ -36,6 +36,7 @@ uint bUseShadowTermForCandidateGeneration;
 RWStructuredBuffer<FHVPT_Reservoir> RWCurrentReservoirs;
 RWStructuredBuffer<FHVPT_Bounce> RWExtraBounces;
 
+// Only used with execute indirect pipeline
 StructuredBuffer<uint> ReservoirIndices;
 
 // Debug tools
@@ -43,23 +44,11 @@ uint DebugFlags;
 RWTexture2D<float3> RWDebugTexture;
 
 // Deferred surface bounces are only used in multi-bounce setups with surface contributions enabled
-#if MULTIPLE_BOUNCES && USE_SURFACE_CONTRIBUTIONS && DEFER_SURFACE_HITS
-struct FHVPT_DeferredSurfaceBounce
-{
-	uint2 RandomSequenceState;
-	uint ReservoirIndex;
-	float3 Origin;
-	float2 Direction;
-	float Depth;
-	uint NumExtraBounces;
-	float PathPDF;
-	float PathPHat;
-	FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES];
-};
 uint SurfaceBounceAllocatorSize;
 RWStructuredBuffer<uint> RWDeferredSurfaceBounceAllocator;
 RWStructuredBuffer<FHVPT_DeferredSurfaceBounce> RWDeferredSurfaceBounces;
-#endif
+RWStructuredBuffer<FHVPT_Bounce> RWDeferredSurfaceExtraBounces;
+
 
 #if USE_SURFACE_CONTRIBUTIONS
 float3 SampleDirectLightingSurface(
@@ -298,6 +287,9 @@ FHVPT_Reservoir ComputeInitialSample(
 
 			if (bAllocSuccess)
 			{
+				uint OutSurfaceBounceIndex = SurfaceBounceAllocatorSize * CandidateIndex + AllocatedIndex;
+				uint OutExtraBounceIndex = OutSurfaceBounceIndex * NumBounces;
+
 				// Create a deferred surface hit to add to the buffer
 				FHVPT_DeferredSurfaceBounce SurfaceBounce = (FHVPT_DeferredSurfaceBounce)0;
 				SurfaceBounce.RandomSequenceState.x = RandSequence.SampleIndex;
@@ -309,12 +301,13 @@ FHVPT_Reservoir ComputeInitialSample(
 				SurfaceBounce.NumExtraBounces = OutReservoir.GetNumExtraBounces();
 				SurfaceBounce.PathPDF = PathPDF;
 				SurfaceBounce.PathPHat = PathPHat;
+				RWDeferredSurfaceBounces[OutSurfaceBounceIndex] = SurfaceBounce;
+
 				// Surface hits are only possible in a multiple bounce permutation, so don't need to #if for multiple bounces
 				for (uint i = 0; i < Bounce; i++)
 				{
-					SurfaceBounce.Bounces[i] = ExtraBounces[i];
+					RWDeferredSurfaceExtraBounces[OutExtraBounceIndex + i] = ExtraBounces[i];
 				}
-				RWDeferredSurfaceBounces[SurfaceBounceAllocatorSize * CandidateIndex + AllocatedIndex] = SurfaceBounce;
 			}
 			else // If failed to allocate space then just trace the ray straight away
 #endif
@@ -503,11 +496,13 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 #if MULTIPLE_BOUNCES && USE_SURFACE_CONTRIBUTIONS && DEFER_SURFACE_HITS
 
 StructuredBuffer<FHVPT_DeferredSurfaceBounce> DeferredSurfaceBounces;
+StructuredBuffer<FHVPT_Bounce> DeferredSurfaceExtraBounces;
 
 // Deferred surface bounces always use indirect dispatch
 RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateSurfaceBouncesRGS)
 {
 	uint SurfaceBounceIndex = DispatchRaysIndex().x;
+	uint SurfaceExtraBouncesStartIndex = SurfaceBounceIndex * NumBounces;
 	FHVPT_DeferredSurfaceBounce SurfaceBounce = DeferredSurfaceBounces[SurfaceBounceIndex];
 	uint ReservoirIndex = SurfaceBounce.ReservoirIndex;
 
@@ -571,7 +566,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateSurfaceBouncesRGS)
 		uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(ReservoirIndex, 0);
 		for (uint i = 0; i < CombinedReservoir.GetNumExtraBounces(); i++)
 		{
-			RWExtraBounces[ExtraBounceIndex + i] = SurfaceBounce.Bounces[i];
+			RWExtraBounces[ExtraBounceIndex + i] = DeferredSurfaceExtraBounces[SurfaceExtraBouncesStartIndex + i];
 		}
 	}
 #endif
