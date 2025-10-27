@@ -87,7 +87,7 @@ void FHVPTViewExtension::PreRenderView_RenderThread(FRDGBuilder& GraphBuilder, F
 	if (HVPT::IsDebugShowFlagEnabled(InView))
 	{
 		ViewState->DebugTexture = GraphBuilder.CreateTexture(
-			FRDGTextureDesc::Create2D(ViewInfo.ViewRect.Size(), PF_FloatRGBA, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_UAV),
+			FRDGTextureDesc::Create2D(ViewInfo.ViewRect.Size(), PF_FloatRGBA, FClearValueBinding::Black, TexCreate_ShaderResource | TexCreate_RenderTargetable | TexCreate_UAV),
 			TEXT("HVPT.DebugTexture"));
 		AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ViewState->DebugTexture), 0.0f);
 
@@ -319,6 +319,12 @@ void FHVPTViewExtension::PostRenderView_RenderThread(FRDGBuilder& GraphBuilder, 
 			GraphBuilder, ViewInfo.Family->RenderTarget->GetRenderTargetTexture(), TEXT("HVPT.DebugRenderTarget")
 		);
 
+		HVPT::DrawDebugOverlay(
+			GraphBuilder,
+			ViewInfo,
+			*ViewState
+		);
+
 		AddDrawTexturePass(
 			GraphBuilder,
 			FScreenPassViewInfo{ ViewInfo },
@@ -383,6 +389,96 @@ FHVPTViewState* FHVPTViewExtension::GetOrCreateViewStateForView(const FViewInfo&
 	}
 
 	return nullptr;
+}
+
+
+void HVPT::DrawDebugOverlay(
+	FRDGBuilder& GraphBuilder,
+	const FViewInfo& ViewInfo,
+	FHVPTViewState& State)
+{
+	FScreenPassRenderTarget Output(State.DebugTexture, ViewInfo.ViewRect, ERenderTargetLoadAction::ELoad);
+	AddDrawCanvasPass(GraphBuilder, RDG_EVENT_NAME("HVPTDebugOverlay"), ViewInfo, Output,
+		[&ViewInfo](FCanvas& Canvas)
+		{
+			float X = 20;
+			float Y = 20;
+			const float YStep = 14;
+			const float ColumnWidth = 200;
+
+			FString Line;
+
+			Line = FString::Printf(TEXT("HVPT Debug"));
+			Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor::White);
+
+			Line = FString::Printf(TEXT("Use r.HVPT.DebugViewMode to select mode."));
+			Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor::Gray);
+
+			Y += YStep;
+
+			uint32 ViewMode = HVPT::GetDebugViewMode();
+
+			// Not including custom - that is a special case
+			static const FString DebugViewModes[] = {
+				TEXT("Num Bounces"),
+				TEXT("Path Type"),
+				TEXT("Light ID"),
+				TEXT("Temporal Reuse"),
+				TEXT("Fireflies"),
+				TEXT("Reprojection")
+			};
+
+			{
+				Line = FString::Printf(TEXT("-1: Custom"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), (HVPT_DEBUG_VIEW_MODE_CUSTOM == ViewMode) ? FLinearColor::Yellow : FLinearColor::Gray);
+			}
+			for (uint32 i = 0; i < std::size(DebugViewModes); i++)
+			{
+				Line = FString::Printf(TEXT(" %d: %s"), i, *DebugViewModes[i]);
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), (i == ViewMode) ? FLinearColor::Yellow : FLinearColor::Gray);
+			}
+			if (ViewMode != HVPT_DEBUG_VIEW_MODE_CUSTOM && ViewMode >= std::size(DebugViewModes))
+			{
+				Line = FString::Printf(TEXT("Unknown view mode '%d'"), ViewMode);
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor::Red);
+			}
+
+			// Add view-mode specific context
+			Y += 2.0f * YStep;
+
+			switch (ViewMode)
+			{
+			case HVPT_DEBUG_VIEW_MODE_PATH_TYPE:
+			{
+				Line = FString::Printf(TEXT("Path Types:"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor::White);
+				Line = FString::Printf(TEXT("Absorption"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor::Red);
+				Line = FString::Printf(TEXT("Scattering"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor::Green);
+				Line = FString::Printf(TEXT("Surface"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor::Blue);
+			} break;
+			case HVPT_DEBUG_VIEW_MODE_TEMPORAL_REUSE:
+			{
+				bool bEnabled = HVPT::GetTemporalReuseEnabled();
+				Line = FString::Printf(TEXT("Temporal Reuse=%s"), bEnabled ? TEXT("True") : TEXT("False"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), bEnabled ? FLinearColor::Green : FLinearColor::Red);
+			} break;
+			case HVPT_DEBUG_VIEW_MODE_REPROJECTION:
+			{
+				bool bEnabled = HVPT::GetTemporalReuseEnabled();
+				Line = FString::Printf(TEXT("Temporal Reuse=%s"), bEnabled ? TEXT("True") : TEXT("False"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), bEnabled ? FLinearColor::Green : FLinearColor::Red);
+
+				bEnabled = HVPT::GetTemporalReprojectionEnabled();
+				Line = FString::Printf(TEXT("Temporal Reprojection=%s"), bEnabled ? TEXT("True") : TEXT("False"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), bEnabled ? FLinearColor::Green : FLinearColor::Red);
+			} break;
+			default:
+				break;
+			}
+		});
 }
 
 #undef LOCTEXT_NAMESPACE

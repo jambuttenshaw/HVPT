@@ -94,5 +94,11 @@ void Accumulate(
 	FHVPTViewState& State
 );
 
+void DrawDebugOverlay(
+	FRDGBuilder& GraphBuilder,
+	const FViewInfo& ViewInfo,
+	FHVPTViewState& State
+);
+
 #endif
 }
