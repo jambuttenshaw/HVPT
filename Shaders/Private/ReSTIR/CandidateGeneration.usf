@@ -123,12 +123,16 @@ FHVPT_Reservoir ComputeInitialSample(
 	uint ReservoirIndex,
 	uint CandidateIndex,
 	FRayDesc Ray,
+	float2 RandSample
 #if MULTIPLE_BOUNCES
-	inout FHVPT_Bounce ExtraBounces[MAX_EXTRA_BOUNCES],
+	, inout FHVPT_Bounce ExtraBounces[MAX_EXTRA_BOUNCES]
 #endif
-	inout RandomSequence RandSequence
 )
 {
+	RandomSequence RandSequence;
+	RandSequence.SampleIndex = asuint(RandSample.x);
+	RandSequence.SampleSeed = asuint(RandSample.y);
+
 	float PathPDF = 1.0f;
 	float PathPHat = 1.0f;
 
@@ -421,11 +425,12 @@ void ReSTIRCandidateGeneration_Main(uint2 PixelCoord, uint ReservoirIndex)
 		FHVPT_Reservoir OutReservoir = ComputeInitialSample(
 			ReservoirIndex,
 			CandidateIndex,
-			PrimaryRay, 
+			PrimaryRay,
+			RandomSequence_GenerateSample2D(RandSequence)
 #if MULTIPLE_BOUNCES
-			OutBounces, 
+			, OutBounces
 #endif
-			RandSequence);
+			);
 
 		bool bSelected = HVPT_SimpleResampleStep<false>(OutReservoir, FinalReservoir, RandomSequence_GenerateSample1D(RandSequence));
 #if MULTIPLE_BOUNCES
