@@ -294,11 +294,10 @@ FHVPT_Reservoir ComputeInitialSample(
 				FHVPT_DeferredSurfaceBounce SurfaceBounce = (FHVPT_DeferredSurfaceBounce)0;
 				SurfaceBounce.RandomSequenceState.x = RandSequence.SampleIndex;
 				SurfaceBounce.RandomSequenceState.y = RandSequence.SampleSeed;
-				SurfaceBounce.ReservoirIndex = ReservoirIndex;
+				HVPT_SurfaceBounce_SetPackedData(SurfaceBounce, ReservoirIndex, OutReservoir.GetNumExtraBounces());
+				HVPT_SurfaceBounce_SetPackedDirection(SurfaceBounce, Ray.Direction);
 				SurfaceBounce.Origin = Ray.Origin;
-				SurfaceBounce.Direction = UnitVectorToOctahedron(Ray.Direction);
 				SurfaceBounce.Depth = OutReservoir.GetDepth();
-				SurfaceBounce.NumExtraBounces = OutReservoir.GetNumExtraBounces();
 				SurfaceBounce.PathPDF = PathPDF;
 				SurfaceBounce.PathPHat = PathPHat;
 				RWDeferredSurfaceBounces[OutSurfaceBounceIndex] = SurfaceBounce;
@@ -493,8 +492,6 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 /// --- DEFERRED SURFACE BOUNCES --- //
 ///////////////////////////////////////
 
-#if MULTIPLE_BOUNCES && USE_SURFACE_CONTRIBUTIONS && DEFER_SURFACE_HITS
-
 StructuredBuffer<FHVPT_DeferredSurfaceBounce> DeferredSurfaceBounces;
 StructuredBuffer<FHVPT_Bounce> DeferredSurfaceExtraBounces;
 
@@ -502,24 +499,25 @@ StructuredBuffer<FHVPT_Bounce> DeferredSurfaceExtraBounces;
 RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateSurfaceBouncesRGS)
 {
 	uint SurfaceBounceIndex = DispatchRaysIndex().x;
-	uint SurfaceExtraBouncesStartIndex = SurfaceBounceIndex * NumBounces;
 	FHVPT_DeferredSurfaceBounce SurfaceBounce = DeferredSurfaceBounces[SurfaceBounceIndex];
-	uint ReservoirIndex = SurfaceBounce.ReservoirIndex;
 
-	RandomSequence RandSequence = { SurfaceBounce.RandomSequenceState.x, SurfaceBounce.RandomSequenceState.y };
-
-	FHVPT_Reservoir OutReservoir = HVPT_CreateNewReservoir();
-	OutReservoir.SetReservoirIndex(ReservoirIndex);
-	OutReservoir.SetDepth(SurfaceBounce.Depth);
-	OutReservoir.SetNumExtraBounces(SurfaceBounce.NumExtraBounces);
-
-	FRayDesc SurfaceRay = HVPT_CreateRayDesc<false>(SurfaceBounce.Origin, OctahedronToUnitVector(SurfaceBounce.Direction), 0.0f, POSITIVE_INFINITY);
+	FRayDesc SurfaceRay = HVPT_CreateRayDesc<false>(SurfaceBounce.Origin, HVPT_SurfaceBounce_GetPackedDirection(SurfaceBounce), 0.0f, POSITIVE_INFINITY);
 	FMaterialClosestHitPayload HitInfo = HVPT_TraceMaterialRay(TLAS, SurfaceRay);
 	if (!HitInfo.IsHit())
 	{
 		return;
 	}
 	FPathTracingPayload Payload = HVPT_CreateSurfaceHitPayload(HitInfo);
+
+	uint NumExtraBounces, ReservoirIndex;
+	HVPT_SurfaceBounce_GetPackedData(SurfaceBounce, ReservoirIndex, NumExtraBounces);
+
+	RandomSequence RandSequence = { SurfaceBounce.RandomSequenceState.x, SurfaceBounce.RandomSequenceState.y };
+
+	FHVPT_Reservoir OutReservoir = HVPT_CreateNewReservoir();
+	OutReservoir.SetReservoirIndex(ReservoirIndex);
+	OutReservoir.SetDepth(SurfaceBounce.Depth);
+	OutReservoir.SetNumExtraBounces(NumExtraBounces);
 
 	// Hit surface - find candidate paths that either sample emissive surface or sample direct light that bounces off surface
 	// In path evaluation, surface hit is denoted by Distance == POSITIVE_INFINITY
@@ -563,16 +561,16 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateSurfaceBouncesRGS)
 	if (bSelected)
 	{
 		// Copy bounces over
-		uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(ReservoirIndex, 0);
+		uint ExtraBounceStartIndex = SurfaceBounceIndex * NumBounces;
+		uint OutExtraStartBounceIndex = HVPT_GetExtraBounceIndex(ReservoirIndex, 0);
 		for (uint i = 0; i < CombinedReservoir.GetNumExtraBounces(); i++)
 		{
-			RWExtraBounces[ExtraBounceIndex + i] = DeferredSurfaceExtraBounces[SurfaceExtraBouncesStartIndex + i];
+			RWExtraBounces[OutExtraStartBounceIndex + i] = DeferredSurfaceExtraBounces[ExtraBounceStartIndex + i];
 		}
 	}
 #endif
 }
 
-#endif
 
 /////////////////////////////////
 // --- DEFERRED EVALUATE F --- //

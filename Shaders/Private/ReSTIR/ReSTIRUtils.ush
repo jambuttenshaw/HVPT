@@ -68,6 +68,29 @@ float4 HVPT_DecodeBounce(FHVPT_Bounce Bounce)
 	return Out;
 }
 
+
+void HVPT_SurfaceBounce_SetPackedData(inout FHVPT_DeferredSurfaceBounce SurfaceBounce, uint ReservoirIndex, uint NumExtraBounces)
+{
+	SurfaceBounce.PackedData = ReservoirIndex << 4 | (NumExtraBounces & 0x00000003) << 1;
+}
+
+void HVPT_SurfaceBounce_GetPackedData(FHVPT_DeferredSurfaceBounce SurfaceBounce, out uint ReservoirIndex, out uint NumExtraBounces)
+{
+	ReservoirIndex = SurfaceBounce.PackedData >> 4;
+	NumExtraBounces = (SurfaceBounce.PackedData >> 1) & 0x00000003;
+}
+
+void HVPT_SurfaceBounce_SetPackedDirection(inout FHVPT_DeferredSurfaceBounce SurfaceBounce, float3 Direction)
+{
+	float2 OctahedronDirection = UnitVectorToOctahedron(Direction);
+	SurfaceBounce.PackedDirection = (f32tof16(OctahedronDirection.x) << 16) | f32tof16(OctahedronDirection.y);
+}
+
+float3 HVPT_SurfaceBounce_GetPackedDirection(FHVPT_DeferredSurfaceBounce SurfaceBounce)
+{
+	return OctahedronToUnitVector(float2(f16tof32(SurfaceBounce.PackedDirection.x >> 16), f16tof32(SurfaceBounce.PackedDirection.x)));
+}
+
 //
 // --- RESERVOIR HELPER FUNCTIONS ---
 //

@@ -88,12 +88,31 @@ struct FHVPT_Bounce
 // TODO: Can do an indirection table where entries have their sort key in top 8(?) bits and index in bottom 24
 struct FHVPT_DeferredSurfaceBounce
 {
+	// Packed data:
+	// uint2		RandomSequenceState
+	//
+	// uint
+	//	28 bits		Reservoir index
+	//   3 bits		Num extra bounces
+	//   1 bit		Unused
+	//
+	// float		Direction (octahedron encoding)
+	//	16 bits		X
+	//	16 bits		Y
+	//
+	// float3		Origin
+	//
+	// float		Depth
+	// float		PDF
+	// float		PHat
+	//
+	// Packing / unpacking utils defined in ReSTIRUtils.ush
+
 	uint2 RandomSequenceState;
-	uint ReservoirIndex;	// TODO: can be 23 bits
+	uint PackedData;
+	uint PackedDirection;
 	float3 Origin;
-	float2 Direction;		// TODO: can be 16 bits per component
-	float Depth;			// TODO: can be 16 bits
-	uint NumExtraBounces;	// TODO: can be 3 bits
+	float Depth;
 	float PathPDF;
 	float PathPHat;
 };
