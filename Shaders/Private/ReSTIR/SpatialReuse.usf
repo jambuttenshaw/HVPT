@@ -98,101 +98,98 @@ void ReSTIRSpatialReuse_Main(uint2 PixelCoord, uint ReservoirIndex)
 	}
 
 	// Including canonical
-	uint TotalSampleCount = NumSpatialSamples + 1;
+	uint TotalSampleCount = 1;
 	int2 Offsets[MAX_SPATIAL_SAMPLES + 1];
 	Offsets[0] = 0;
 
 	// Generate offsets
-	for (uint i = 1; i < TotalSampleCount; i++)
+	for (uint i = 1; i < (NumSpatialSamples + 1); i++)
 	{
-		Offsets[i] = GenerateNeighbourhoodOffset(RandSequence);
-	}
+		int2 Offset = GenerateNeighbourhoodOffset(RandSequence);
+		int2 TapPos = PixelCoord + Offset;
+		if (IsWithinRange(TapPos, (uint2)View.ViewSizeAndInvSize.xy))
+		{
+			FHVPT_Reservoir Tap = InReservoirs[HVPT_GetReservoirIndex((uint2)TapPos)];
+			if (Tap.M > 0)
+			{
+				Offsets[TotalSampleCount++] = Offset;
+			}
+		}
+	} 
 
 	for (uint i = 0; i < TotalSampleCount; i++)
 	{
 		int2 Offset = Offsets[i];
 		int2 TapPos = (int2)PixelCoord + Offset;
-		if (IsWithinRange(TapPos, (uint2)View.ViewSizeAndInvSize.xy))
+
+		FHVPT_Reservoir Tap = InReservoirs[HVPT_GetReservoirIndex((uint2)TapPos)];
+
+#if MULTIPLE_BOUNCES
+		LoadExtraBounces(Tap.GetReservoirIndex(), Tap.GetNumExtraBounces(), Bounces);
+#endif
+
+		float MISWeight = 1.0f;
+
+		if (i > 0) // Don't resample canonical - its already in this domain
 		{
-			FHVPT_Reservoir Tap = InReservoirs[HVPT_GetReservoirIndex((uint2)TapPos)];
-			if (Tap.M == 0)
-				continue;
-
-			float MISWeight = 1.0f;
-
-			if (i > 0) // Don't resample canonical - its already in this domain
-			{
+			HVPT_ResampleNeighbour<SHADING_QUALITY_SPATIAL_REUSE>(Tap, 
 #if MULTIPLE_BOUNCES
-				LoadExtraBounces(Tap.GetReservoirIndex(), Tap.GetNumExtraBounces(), Bounces);
+				Bounces, 
 #endif
-				HVPT_ResampleNeighbour<SHADING_QUALITY_SPATIAL_REUSE>(Tap, 
-#if MULTIPLE_BOUNCES
-					Bounces, 
-#endif
-					CanonicalRay, RandSequence);
-			}
-
-			if (bTalbotMIS && Tap.RunningSum > 0.0f)
-			{
-				float PSum = 0.0f;
-				float PQi = 0.0f;
-				float K = 0.0f;
-
-				for (int j = 0; j < TotalSampleCount; j++)
-				{
-					int2 Offset_j = Offsets[j];
-					int2 TapPos_j = (int2)PixelCoord + Offset_j;
-
-					if (!IsWithinRange(TapPos_j, View.ViewSizeAndInvSize.xy))
-						continue;
-
-					FHVPT_Reservoir Tap_j = InReservoirs[HVPT_GetReservoirIndex((uint2)TapPos_j)];
-					if (Tap_j.M == 0)
-						continue;
-
-					K += Tap_j.M;
-
-					if (j == 0)
-					{
-						PQi = Tap.P_y;
-						PSum += Tap.P_y * Tap_j.M;
-					}
-					else if (i == j)
-					{
-						PQi = Tap_j.P_y;
-						PSum += Tap_j.P_y * Tap_j.M;
-					}
-					else
-					{
-						FRayDesc NeighbourRay = HVPT_CreateRayDesc(
-							CanonicalRay.Origin,
-							HVPT_GetRayDirection(TapPos_j)
-						);
-
-#if MULTIPLE_BOUNCES
-						if (i == 0) LoadExtraBounces(Tap.GetReservoirIndex(), Tap.GetNumExtraBounces(), Bounces);
-#endif
-
-						float P_y = Luminance(HVPT_EvaluateF<SHADING_QUALITY_SPATIAL_REUSE>(Tap,
-#if MULTIPLE_BOUNCES
-							Bounces,
-#endif
-							NeighbourRay,
-							RandSequence));
-						if (isinf(P_y) || isnan(P_y))
-						{
-							P_y = 0.0f;
-						}
-						PSum += P_y * Tap_j.M;
-					}
-				}
-
-				MISWeight = PSum > 0.0f ? PQi * K / PSum : 0.0f;
-			}
-
-			Tap.RunningSum *= MISWeight;
-			(void)HVPT_SimpleResampleStep<false>(Tap, OutReservoir, RandomSequence_GenerateSample1D(RandSequence));
+				CanonicalRay, RandSequence);
 		}
+
+		if (bTalbotMIS && Tap.RunningSum > 0.0f)
+		{
+			float PSum = 0.0f;
+			float PQi = 0.0f;
+			float K = 0.0f;
+
+			for (int j = 0; j < TotalSampleCount; j++)
+			{
+				int2 Offset_j = Offsets[j];
+				int2 TapPos_j = (int2)PixelCoord + Offset_j;
+
+				FHVPT_Reservoir Tap_j = InReservoirs[HVPT_GetReservoirIndex((uint2)TapPos_j)];
+
+				K += Tap_j.M;
+
+				if (j == 0)
+				{
+					PQi = Tap.P_y;
+					PSum += Tap.P_y * Tap_j.M;
+				}
+				else if (i == j)
+				{
+					PQi = Tap_j.P_y;
+					PSum += Tap_j.P_y * Tap_j.M;
+				}
+				else
+				{
+					FRayDesc NeighbourRay = HVPT_CreateRayDesc(
+						CanonicalRay.Origin,
+						HVPT_GetRayDirection(TapPos_j)
+					);
+
+					float P_y = Luminance(HVPT_EvaluateF<SHADING_QUALITY_SPATIAL_REUSE>(Tap,
+#if MULTIPLE_BOUNCES
+						Bounces,
+#endif
+						NeighbourRay,
+						RandSequence));
+					if (isinf(P_y) || isnan(P_y))
+					{
+						P_y = 0.0f;
+					}
+					PSum += P_y * Tap_j.M;
+				}
+			}
+
+			MISWeight = PSum > 0.0f ? PQi * K / PSum : 0.0f;
+		}
+
+		Tap.RunningSum *= MISWeight;
+		(void)HVPT_SimpleResampleStep<false>(Tap, OutReservoir, RandomSequence_GenerateSample1D(RandSequence));
 	}
 
 	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(OutReservoir.GetReservoirIndex());
