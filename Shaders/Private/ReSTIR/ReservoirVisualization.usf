@@ -52,15 +52,10 @@ void ReSTIRDebugVisualizationCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 			break;
 		case HVPT_DEBUG_VIEW_MODE_PATH_TYPE:
 		{
-			if (Reservoir.GetNumExtraBounces() > 0)
+			if (Reservoir.GetSurfacePath())
 			{
-				FHVPT_Bounce LastBounce = ExtraBounces[HVPT_GetExtraBounceIndex(PixelCoord, Reservoir.GetNumExtraBounces() - 1)];
-				if (HVPT_DecodeBounce(LastBounce).w == POSITIVE_INFINITY)
-				{
-					// Surface path
-					OutColor = float3(0, 0, 1);
-					break;
-				}
+				OutColor = float3(0, 0, 1);
+				break;
 			}
 
 			if (Reservoir.GetEmissionPath())

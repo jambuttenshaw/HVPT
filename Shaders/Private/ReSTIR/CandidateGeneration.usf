@@ -354,6 +354,7 @@ FHVPT_Reservoir ComputeInitialSample(
 						OutReservoir.RunningSum = OutReservoir.P_y / PathPDF;
 						OutReservoir.SetEmissionPath(bEmissionPath);
 						OutReservoir.SetLightId(LightId);
+						OutReservoir.SetSurfacePath(true);
 					}
 				}
 			}
@@ -554,6 +555,7 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateSurfaceBouncesRGS)
 		OutReservoir.RunningSum = OutReservoir.P_y / SurfaceBounce.PathPDF;
 		OutReservoir.SetEmissionPath(bEmissionPath);
 		OutReservoir.SetLightId(LightId);
+		OutReservoir.SetSurfacePath(true);
 	}
 
 	// Combine the reservoir created from surface with the one stored for this pixel
