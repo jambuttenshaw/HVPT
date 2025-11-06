@@ -332,7 +332,7 @@ void ReSTIRTemporalReuse_Main(uint2 PixelCoord, uint ReservoirIndex)
 #if DEBUG_OUTPUT_ENABLED
 	if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_TEMPORAL_REUSE)
 	{
-		RWDebugTexture[PixelCoord] = (SelectedId == 0) ? float3(1, 0, 0) : float3(0, 1, 0);
+		RWDebugTexture[PixelCoord] = (SelectedId == 0) ? float3(1, 1, 0) : float3(0, 1, 1);
 	}
 	else if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_REPROJECTION)
 	{

@@ -193,6 +193,7 @@ void ReSTIRSpatialReuse_Main(uint2 PixelCoord, uint ReservoirIndex)
 	}
 
 	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(OutReservoir.GetReservoirIndex());
+	bool bSpatialSampleSelected = ReservoirIndex != OutReservoir.GetReservoirIndex();
 	OutReservoir.SetReservoirIndex(ReservoirIndex);
 	RWOutReservoirs[ReservoirIndex] = OutReservoir;
 
@@ -204,6 +205,12 @@ void ReSTIRSpatialReuse_Main(uint2 PixelCoord, uint ReservoirIndex)
 		{
 			RWOutExtraBounces[OutExtraBounceIndex + Bounce] = InExtraBounces[ExtraBounceIndex + Bounce];
 		}
+	}
+#endif
+#if DEBUG_OUTPUT_ENABLED
+	if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_SPATIAL_REUSE)
+	{
+		RWDebugTexture[PixelCoord] = bSpatialSampleSelected ? float3(0, 1, 1) : float3(1, 1, 0);
 	}
 #endif
 }

@@ -376,7 +376,7 @@ namespace HVPT
 
 	int32 GetMaxBounces()
 	{
-		return FMath::Max(CVarHVPTMaxBounces.GetValueOnRenderThread(), 0);
+		return FMath::Max(CVarHVPTMaxBounces.GetValueOnRenderThread(), 1);
 	}
 
 	int32 GetMaxRaymarchSteps()

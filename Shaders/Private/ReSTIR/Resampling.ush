@@ -33,4 +33,23 @@ void HVPT_ResampleNeighbour(
 	Tap.P_y = P_y_hat;
 }
 
+
+void HVPT_ResampleNeighbour(
+	inout FHVPT_Reservoir Tap,
+	float P_y_hat, // Tap evaluated in domain it is to be resampled in
+	inout RandomSequence RandSequence)
+{
+	if (Tap.RunningSum == 0.0f)
+		return;
+
+	float Weight = P_y_hat / Tap.P_y;
+	if (isinf(Weight) || isnan(Weight))
+	{
+		Weight = 0.0f;
+	}
+
+	Tap.RunningSum *= Weight;
+	Tap.P_y = P_y_hat;
+}
+
 #endif

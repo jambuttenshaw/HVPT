@@ -74,6 +74,9 @@ void ReSTIRDebugVisualizationCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 		case HVPT_DEBUG_VIEW_MODE_TEMPORAL_REUSE:
 			// Written in TemporalReuse.usf
 			return;
+		case HVPT_DEBUG_VIEW_MODE_SPATIAL_REUSE:
+		// Written in SpatialReuse.usf / SpatialReuse_MultiPass.usf
+			return;
 		case HVPT_DEBUG_VIEW_MODE_FIREFLY_DETECTION:
 			OutColor = float3(Reservoir.RunningSum / 10.0f, Reservoir.RunningSum / 100.0f, Reservoir.RunningSum / 1000.0f);
 			break;

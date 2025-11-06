@@ -424,6 +424,7 @@ void HVPT::DrawDebugOverlay(
 				TEXT("Path Type"),
 				TEXT("Light ID"),
 				TEXT("Temporal Reuse"),
+				TEXT("Spatial Reuse"),
 				TEXT("Fireflies"),
 				TEXT("Reprojection")
 			};
@@ -464,6 +465,24 @@ void HVPT::DrawDebugOverlay(
 				bool bEnabled = HVPT::GetTemporalReuseEnabled();
 				Line = FString::Printf(TEXT("Temporal Reuse=%s"), bEnabled ? TEXT("True") : TEXT("False"));
 				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), bEnabled ? FLinearColor::Green : FLinearColor::Red);
+				Line = FString::Printf(TEXT("Key:"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor::Gray);
+				Line = FString::Printf(TEXT("Canonical Sample"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor::Yellow);
+				Line = FString::Printf(TEXT("Temporal Sample"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), {0.0f, 1.0f, 1.0f});
+			} break;
+			case HVPT_DEBUG_VIEW_MODE_SPATIAL_REUSE:
+			{
+				bool bEnabled = HVPT::GetSpatialReuseEnabled();
+				Line = FString::Printf(TEXT("Spatial Reuse=%s"), bEnabled ? TEXT("True") : TEXT("False"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), bEnabled ? FLinearColor::Green : FLinearColor::Red);
+				Line = FString::Printf(TEXT("Key:"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor::Gray);
+				Line = FString::Printf(TEXT("Canonical Sample"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), FLinearColor::Yellow);
+				Line = FString::Printf(TEXT("Spatial Sample"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), { 0.0f, 1.0f, 1.0f });
 			} break;
 			case HVPT_DEBUG_VIEW_MODE_REPROJECTION:
 			{
