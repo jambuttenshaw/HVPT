@@ -103,6 +103,7 @@ int4 ResultBufferIndexToTileIndexAndNeighbourOffset(uint LinearBufferedTileIndex
 
 // Encodes the neighbours index as an offset from my index
 // Uses top 8 bits for X component and bottom 8 bits for Y component
+// 1 bit is used as a sign bit followed by 7 bits encoding magnitude
 uint16_t PackNeighbourOffset(int2 Offset)
 {
 	uint2 Magnitude = (uint2)min(abs(Offset), 127);
@@ -129,21 +130,21 @@ int2 UnpackNeighbourOffset(uint16_t Packed)
 
 // Encodes a key for sorting in top 4 bits (surface path boolean, then 3 bits for num bounces)
 // And then the buffered tile index to identify the (reservoir, domain) pair to be evaluated
-uint PackEvaluationIndirectionBufferElement(bool bSurfacePath, uint NumExtraBounces, uint LinearBufferedTileIndex, bool bCanonical)
+uint PackEvaluationIndirectionBufferElement(bool bSurfacePath, uint NumExtraBounces, uint LinearBufferedTileIndex)
 {
-	return (bSurfacePath << 31) | ((NumExtraBounces & 0x7) << 28) | (bCanonical << 27) | (LinearBufferedTileIndex & 0x0FFFFFFF);
+	return (bSurfacePath << 31) | ((NumExtraBounces & 0x7) << 28) | (LinearBufferedTileIndex & 0x0FFFFFFF);
 }
 
 // Returns the linear buffered tile index (that is the only important data - the rest is just used as a key for sorting
-uint2 UnpackEvaluationIndirectionBufferElement(uint IndirectionBufferElement)
+uint UnpackEvaluationIndirectionBufferElement(uint IndirectionBufferElement)
 {
-	return uint2(IndirectionBufferElement & 0x07FFFFFF, (IndirectionBufferElement & 0x08000000) > 0);
+	return IndirectionBufferElement & 0x0FFFFFFF;
 }
 
 
 // --- Kernels --- //
 
-RWStructuredBuffer<uint16_t> RWNeighbourIndices;
+RWBuffer<uint16_t> RWNeighbourIndices;
 RWStructuredBuffer<uint> RWEvaluationResults;
 RWStructuredBuffer<uint> RWEvaluationIndirectionBuffer;
 RWStructuredBuffer<uint> RWIndirectionAllocator;
@@ -167,7 +168,7 @@ bool FlagPathForEvaluationIfRequired(uint EvaluationBufferIndex)
 	return PrevValue == HVPT_SPATIAL_REUSE_UNALLOCATED;
 }
 
-void AllocateReservoirDomainPairEvaluation(int2 CanonicalPixelCoord, int2 ReservoirPixelCoord, int2 DomainPixelCoord, FHVPT_Reservoir Tap)
+void AllocateReservoirDomainPairEvaluation(int2 ReservoirPixelCoord, int2 DomainPixelCoord, FHVPT_Reservoir Tap)
 {
 	uint EvaluationBufferIndex = GetResultBufferIndex(ReservoirPixelCoord, DomainPixelCoord);
 
@@ -179,8 +180,7 @@ void AllocateReservoirDomainPairEvaluation(int2 CanonicalPixelCoord, int2 Reserv
 		uint PackedData = PackEvaluationIndirectionBufferElement(
 			Tap.GetSurfacePath(),
 			Tap.GetNumExtraBounces(),
-			EvaluationBufferIndex,
-			all(ReservoirPixelCoord == CanonicalPixelCoord)
+			EvaluationBufferIndex
 		);
 		RWEvaluationIndirectionBuffer[Index] = PackedData;
 	}
@@ -261,7 +261,7 @@ void ReSTIRSpatialReuse_ChooseNeighboursCS(uint3 DTid : SV_DispatchThreadID)
 				int2 PixelCoord_j = PixelCoord + Offset_j;
 
 				// Evaluate reservoir i in domain j
-				AllocateReservoirDomainPairEvaluation(PixelCoord, PixelCoord_i, PixelCoord_j, Tap);
+				AllocateReservoirDomainPairEvaluation(PixelCoord_i, PixelCoord_j, Tap);
 			}
 		}
 	}
@@ -272,9 +272,7 @@ StructuredBuffer<uint> EvaluationIndirectionBuffer;
 
 RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuse_EvaluateRGS)
 {
-	uint2 UnpackedData = UnpackEvaluationIndirectionBufferElement(EvaluationIndirectionBuffer[DispatchRaysIndex().x]);
-	uint LinearEvaluationBufferIndex = UnpackedData.x;
-	bool bCanonical = UnpackedData.y;
+	uint LinearEvaluationBufferIndex = UnpackEvaluationIndirectionBufferElement(EvaluationIndirectionBuffer[DispatchRaysIndex().x]);
 
 	int4 Unpacked = ResultBufferIndexToTileIndexAndNeighbourOffset(LinearEvaluationBufferIndex);
 	int2 TileIndex = Unpacked.xy;
@@ -288,18 +286,16 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuse_EvaluateRGS)
 	RandomSequence_Initialize(RandSequence, ReservoirIndex, TemporalSeed);
 
 	// Create ray in the domain we want to evaluate path in
-	FRayDesc Ray;
-	Ray.Origin = View.TranslatedWorldCameraOrigin;
-	Ray.Direction = HVPT_GetRayDirection((uint2)Domain);
-
-	FVolumeIntersection Intersection = HVPT_Intersect(Ray.Origin, Ray.Direction, 0.0f, POSITIVE_INFINITY);
-	Ray.TMin = Intersection.VolumeTMin;
-	Ray.TMax = Intersection.VolumeTMax;
+	FRayDesc Ray = HVPT_CreateRayDesc(
+		View.TranslatedWorldCameraOrigin,
+		HVPT_GetRayDirection((uint2) Domain),
+		0.0f,
+		POSITIVE_INFINITY);
 
 	FHVPT_Reservoir Tap = InReservoirs[ReservoirIndex];
 #if MULTIPLE_BOUNCES
 	FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES];
-	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(ReservoirIndex);
+	uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(Tap.GetReservoirIndex());
 	for (uint i = 0; i < Tap.GetNumExtraBounces(); i++)
 	{
 		Bounces[i] = InExtraBounces[ExtraBounceIndex + i];
@@ -323,18 +319,18 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuse_EvaluateRGS)
 }
 
 
-StructuredBuffer<uint16_t> NeighbourIndices;
+Buffer<uint16_t> NeighbourIndices;
 StructuredBuffer<uint> EvaluationResults;
 
 [numthreads(THREADGROUP_SIZE_2D, THREADGROUP_SIZE_2D, 1)]
 void ReSTIRSpatialReuse_GatherAndReuseCS(uint3 DTid : SV_DispatchThreadID)
 {
-	int2 TileIndex = (int2)DTid.xy;
+	int2 TileIndex = (int2) DTid.xy;
 	if (any(TileIndex >= TileSize))
 		return;
 
-	uint2 PixelCoord = TileIndexToPixelCoord(TileIndex);
-	uint ReservoirIndex = HVPT_GetReservoirIndex(PixelCoord);
+	int2 PixelCoord = TileIndexToPixelCoord(TileIndex);
+	uint ReservoirIndex = HVPT_GetReservoirIndex((uint2) PixelCoord);
 
 	FHVPT_Reservoir OutReservoir = HVPT_CreateNewReservoir();
 
@@ -342,7 +338,7 @@ void ReSTIRSpatialReuse_GatherAndReuseCS(uint3 DTid : SV_DispatchThreadID)
 	RandomSequence_Initialize(RandSequence, ReservoirIndex, TemporalSeed);
 
 	// Check if pixel should have any volume radiance at all
-	if (FeatureTexture[PixelCoord].r == 1.0f)
+	if (FeatureTexture[(uint2) PixelCoord].r == 1.0f)
 	{
 		OutReservoir = InReservoirs[ReservoirIndex];
 		RWOutReservoirs[ReservoirIndex] = OutReservoir;
@@ -366,47 +362,28 @@ void ReSTIRSpatialReuse_GatherAndReuseCS(uint3 DTid : SV_DispatchThreadID)
 	for (uint i = 0; i < NumSpatialSamples; i++)
 	{
 		uint16_t PackedOffset = NeighbourIndices[NeighbourIndex + i];
-		if (PackedOffset == HVPT_SPATIAL_REUSE_NEIGHBOUR_TERMINATOR)
-			break;
-		PackedOffsets[TotalSampleCount++] = PackedOffset;
+		if (PackedOffset != HVPT_SPATIAL_REUSE_NEIGHBOUR_TERMINATOR)
+		{
+			PackedOffsets[TotalSampleCount++] = PackedOffset;
+		}
 	}
 
 	for (uint i = 0; i < TotalSampleCount; i++)
 	{
-		int2 TapPos = (int2) PixelCoord + UnpackNeighbourOffset(PackedOffsets[i]);
-
+		int2 TapPos = PixelCoord + UnpackNeighbourOffset(PackedOffsets[i]);
 		FHVPT_Reservoir Tap = InReservoirs[HVPT_GetReservoirIndex((uint2) TapPos)];
 
 		float MISWeight = 1.0f;
 
 		if (i > 0) // Don't resample canonical - its already in this domain
 		{
-			/*
-			uint ResultBufferIndex = GetResultBufferIndex(PixelCoord, TapPos);
-			uint ResultsData = EvaluationResults[ResultBufferIndex];
-			float P_y_hat = asfloat(ResultsData);
+			uint ResultBufferIndex = GetResultBufferIndex(TapPos, PixelCoord);
+			float P_y_hat = asfloat(EvaluationResults[ResultBufferIndex]);
 
 			HVPT_ResampleNeighbour(Tap, P_y_hat, RandSequence);
-			*/
-
-			FRayDesc CanonicalRay = HVPT_CreateRayDesc(PixelCoord);
-#if MULTIPLE_BOUNCES
-			FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES];
-			uint ExtraBounceIndex = HVPT_GetExtraBounceIndex(ReservoirIndex, 0);
-			for (uint Bounce = 0; Bounce < Tap.GetNumExtraBounces(); Bounce++)
-			{
-				Bounces[Bounce] = InExtraBounces[ExtraBounceIndex + Bounce];
-			}
-#endif
-
-			HVPT_ResampleNeighbour<SHADING_QUALITY_SPATIAL_REUSE>(Tap, 
-#if MULTIPLE_BOUNCES
-				Bounces, 
-#endif
-				CanonicalRay, RandSequence);
 		}
 
-		if (false && Tap.RunningSum > 0.0f)
+		if (Tap.RunningSum > 0.0f)
 		{
 			float PSum = 0.0f;
 			float PQi = 0.0f;
@@ -414,7 +391,7 @@ void ReSTIRSpatialReuse_GatherAndReuseCS(uint3 DTid : SV_DispatchThreadID)
 
 			for (int j = 0; j < TotalSampleCount; j++)
 			{
-				int2 TapPos_j = (int2) PixelCoord + UnpackNeighbourOffset(PackedOffsets[j]);
+				int2 TapPos_j = PixelCoord + UnpackNeighbourOffset(PackedOffsets[j]);
 
 				FHVPT_Reservoir Tap_j = InReservoirs[HVPT_GetReservoirIndex((uint2) TapPos_j)];
 
@@ -434,9 +411,7 @@ void ReSTIRSpatialReuse_GatherAndReuseCS(uint3 DTid : SV_DispatchThreadID)
 				{
 					// Load P_y
 					uint ResultBufferIndex = GetResultBufferIndex(TapPos, TapPos_j);
-					uint ResultsData = EvaluationResults[ResultBufferIndex];
-					float P_y = asfloat(ResultsData);
-
+					float P_y = asfloat(EvaluationResults[ResultBufferIndex]);
 					PSum += P_y * Tap_j.M;
 				}
 			}
