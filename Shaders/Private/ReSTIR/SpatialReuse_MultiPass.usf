@@ -150,7 +150,7 @@ uint UnpackEvaluationIndirectionBufferElement(uint IndirectionBufferElement)
 
 RWBuffer<uint16_t> RWNeighbourIndices;
 RWByteAddressBuffer RWEvaluationResults_ByteAddress;
-RWStructuredBuffer<uint> RWEvaluationIndirectionBuffer;
+RWBuffer<uint> RWEvaluationIndirectionBuffer;
 RWStructuredBuffer<uint> RWIndirectionAllocator;
 
 bool IsWithinRange(int2 pos, uint2 range)
@@ -291,7 +291,7 @@ void ReSTIRSpatialReuse_ChooseNeighboursCS(uint3 DTid : SV_DispatchThreadID)
 }
 
 
-StructuredBuffer<uint> EvaluationIndirectionBuffer;
+Buffer<uint> EvaluationIndirectionBuffer;
 RWBuffer<RESULT_BUFFER_TYPE> RWEvaluationResults;
 
 RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuse_EvaluateRGS)

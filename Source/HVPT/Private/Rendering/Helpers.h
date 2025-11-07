@@ -46,4 +46,11 @@ TOptional<FScopedUniformBufferStaticBindings> BindStaticUniformBufferBindings(
 
 FHVPT_PathTracingFogParameters PrepareFogParameters(const FViewInfo& View, const FExponentialHeightFogSceneInfo& FogInfo);
 
+// GPU-driven radix sort (number of elements to sort is supplied by previous GPU work)
+// Requires two buffers to operate (ping-pong)
+// BufferIndex specifies the buffer containing unsorted data initially
+// Returns index of buffer containing sorted result
+// Implemented in RadixSort.cpp
+uint32 SortBufferIndirect(FRDGBuilder& GraphBuilder, TArrayView<FRDGBufferRef> InBuffers, int32 BufferIndex, FRDGBufferRef Counter, uint32 CounterOffset, uint32 KeyMask, ERHIFeatureLevel::Type FeatureLevel);
+
 }

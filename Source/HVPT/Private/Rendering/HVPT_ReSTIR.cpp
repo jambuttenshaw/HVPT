@@ -55,6 +55,16 @@ static TAutoConsoleVariable<bool> CVarHVPTReSTIRMultiPassSpatialReuse(
 	ECVF_RenderThreadSafe
 );
 
+static TAutoConsoleVariable<int32> CVarHVPTReSTIRMultiPassSpatialReuseSorting(
+	TEXT("r.HVPT.ReSTIR.SpatialReuse.MultiPass.Sorting"),
+	2,
+	TEXT("Performs a radix sort on the indirection table to increase coherency of raytracing pass."
+	"	0: Sorting is disabled"
+	"	1: Rays are sorted by num bounces and whether they hit a surface only"
+	"	2: Rays are additionally sorted by their index into result buffer"),
+	ECVF_RenderThreadSafe
+);
+
 static TAutoConsoleVariable<int32> CVarHVPTReSTIRMultiPassSpatialReuseIndirectionBufferSize(
 	TEXT("r.HVPT.ReSTIR.SpatialReuse.MultiPass.IndirectionBufferSize"),
 	16'000'000,
@@ -64,7 +74,7 @@ static TAutoConsoleVariable<int32> CVarHVPTReSTIRMultiPassSpatialReuseIndirectio
 
 static TAutoConsoleVariable<bool> CVarHVPTReSTIRMultiPassSpatialReuse16BitBuffer(
 	TEXT("r.HVPT.ReSTIR.SpatialReuse.MultiPass.16BitResultBuffer"),
-	false,
+	true,
 	TEXT("Whether to use 16 bit buffer for path evaluation results (otherwise 32 bit is used)."),
 	ECVF_RenderThreadSafe
 );
@@ -367,8 +377,8 @@ public:
 
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint16_t>, RWNeighbourIndices)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWByteAddressBuffer, RWEvaluationResults_ByteAddress)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWEvaluationIndirectionBuffer)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWByteAddressBuffer<uint>, RWIndirectionAllocator)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWEvaluationIndirectionBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWIndirectionAllocator)
 
 		// Debug tools
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float3>, RWDebugTexture)
@@ -422,7 +432,7 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Reservoir>, InReservoirs)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Bounce>, InExtraBounces)
 
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EvaluationIndirectionBuffer)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, EvaluationIndirectionBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint16_t>, RWEvaluationResults)
 	END_SHADER_PARAMETER_STRUCT()
 
@@ -1054,13 +1064,13 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 			// Allocate transient buffers required for intermediate results
 			FRDGBufferRef NeighbourIndicesBuffer = GraphBuilder.CreateBuffer(
-				FRDGBufferDesc::CreateBufferDesc(sizeof(uint16), ReservoirsPerTile * NumSpatialSamples), TEXT("NeighbourIndices"));
+				FRDGBufferDesc::CreateBufferDesc(sizeof(uint16), ReservoirsPerTile * NumSpatialSamples), TEXT("HVPT.ReSTIR.NeighbourIndices"));
 			FRDGBufferRef EvaluationResultsBuffer = GraphBuilder.CreateBuffer(
-				FRDGBufferDesc::CreateBufferDesc(ResultBufferElementSize, MaxEvaluationsPerTile), TEXT("EvaluationResults"));
+				FRDGBufferDesc::CreateBufferDesc(ResultBufferElementSize, MaxEvaluationsPerTile), TEXT("HVPT.ReSTIR.EvaluationResults"));
 			FRDGBufferRef EvaluationIndirectionBuffer = GraphBuilder.CreateBuffer(
-				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), IndirectionBufferElementCount), TEXT("EvaluationIndirection"));
+				FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), IndirectionBufferElementCount), TEXT("HVPT.ReSTIR.EvaluationIndirection"));
 			FRDGBufferRef IndirectionBufferAllocator = GraphBuilder.CreateBuffer(
-				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 1), TEXT("IndirectionAllocator"));
+				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 1), TEXT("HVPT.ReSTIR.IndirectionAllocator"));
 
 			FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(ViewInfo.FeatureLevel);
 
@@ -1114,7 +1124,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 					PassParameters->RWNeighbourIndices = GraphBuilder.CreateUAV(NeighbourIndicesBuffer, PF_R16_UINT);
 					PassParameters->RWEvaluationResults_ByteAddress = GraphBuilder.CreateUAV(EvaluationResultsBuffer, ResultBufferFormat);
-					PassParameters->RWEvaluationIndirectionBuffer = GraphBuilder.CreateUAV(EvaluationIndirectionBuffer);
+					PassParameters->RWEvaluationIndirectionBuffer = GraphBuilder.CreateUAV(EvaluationIndirectionBuffer, PF_R32_UINT);
 					PassParameters->RWIndirectionAllocator = GraphBuilder.CreateUAV(IndirectionBufferAllocator);
 
 					if (State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE)
@@ -1139,15 +1149,34 @@ void HVPT::RenderWithReSTIRPathTracing(
 				}
 
 				// Step 2: Sorting and compaction on EvaluationIndirectionBuffer which enables nearby threads to evaluate paths of similar lengths
+				int32 SortingMode = CVarHVPTReSTIRMultiPassSpatialReuseSorting.GetValueOnRenderThread();
+				if (SortingMode > 0)
 				{
-					
+					RDG_EVENT_SCOPE(GraphBuilder, "SortIndirectionBuffer");
+
+					TStaticArray<FRDGBufferRef, 2> SortingPingPongBuffers;
+					SortingPingPongBuffers[0] = EvaluationIndirectionBuffer;
+					SortingPingPongBuffers[1] = GraphBuilder.CreateBuffer(EvaluationIndirectionBuffer->Desc, TEXT("HVPT.ReSTIR.EvaluationIndirectionPingPong"));
+					uint32 BufferIndex = 0;
+
+					BufferIndex = HVPT::Private::SortBufferIndirect(
+						GraphBuilder,
+						SortingPingPongBuffers,
+						BufferIndex,
+						IndirectionBufferAllocator,
+						0,
+						SortingMode == 2 ? 0xFFFFFFFF : 0xF0000000,
+						ViewInfo.FeatureLevel
+					);
+
+					EvaluationIndirectionBuffer = SortingPingPongBuffers[BufferIndex];
 				}
 				
 				// Step 3: Evaluating paths. Each path that is needed to be evaluated in the indirection buffer will be executed and the result stored in EvaluationResultsBuffer
 				{
 					// Setup indirect arguments
 					FRDGBufferRef IndirectArguments = FComputeShaderUtils::AddIndirectArgsSetupCsPass1D(
-						GraphBuilder, ViewInfo.FeatureLevel, IndirectionBufferAllocator, TEXT("HVPT.ReSTIR.DeferredSurfaceBouncesIndirectArguments"), 1);
+						GraphBuilder, ViewInfo.FeatureLevel, IndirectionBufferAllocator, TEXT("HVPT.ReSTIR.SpatialReuseIndirectArguments"), 1);
 
 					FReSTIRSpatialReuse_EvaluateRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRSpatialReuse_EvaluateRGS::FParameters>();
 					PopulateCommonParameters(&PassParameters->Common);
@@ -1159,7 +1188,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 					if (HVPT::GetMaxBounces() > 1)
 						PassParameters->InExtraBounces = GraphBuilder.CreateSRV(ExtraBouncesA);
 
-					PassParameters->EvaluationIndirectionBuffer = GraphBuilder.CreateSRV(EvaluationIndirectionBuffer);
+					PassParameters->EvaluationIndirectionBuffer = GraphBuilder.CreateSRV(EvaluationIndirectionBuffer, PF_R32_UINT);
 					PassParameters->RWEvaluationResults = GraphBuilder.CreateUAV(EvaluationResultsBuffer, ResultBufferFormat);
 
 					FReSTIRSpatialReuse_EvaluateRGS::FPermutationDomain Permutation = CreatePermutation<FReSTIRSpatialReuse_EvaluateRGS>(State);
