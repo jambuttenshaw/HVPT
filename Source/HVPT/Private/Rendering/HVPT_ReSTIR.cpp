@@ -62,6 +62,14 @@ static TAutoConsoleVariable<int32> CVarHVPTReSTIRMultiPassSpatialReuseIndirectio
 	ECVF_RenderThreadSafe
 );
 
+static TAutoConsoleVariable<bool> CVarHVPTReSTIRMultiPassSpatialReuse16BitBuffer(
+	TEXT("r.HVPT.ReSTIR.SpatialReuse.MultiPass.16BitResultBuffer"),
+	false,
+	TEXT("Whether to use 16 bit buffer for path evaluation results (otherwise 32 bit is used)."),
+	ECVF_RenderThreadSafe
+);
+
+
 static bool DeferSurfaceHits()
 {
 	return (HVPT::GetMaxBounces() > 1) && HVPT::UseSurfaceContributions() && CVarHVPTReSTIRDeferSurfaceBounces.GetValueOnRenderThread();
@@ -343,8 +351,9 @@ public:
 	DECLARE_GLOBAL_SHADER(FReSTIRSpatialReuse_ChooseNeighboursCS);
 	SHADER_USE_PARAMETER_STRUCT(FReSTIRSpatialReuse_ChooseNeighboursCS, FGlobalShader);
 
+	class FUse16BitResultBuffer : SHADER_PERMUTATION_BOOL("USE_16_BIT_RESULT_BUFFER");
 	class FDebugOutputEnabled : SHADER_PERMUTATION_BOOL("DEBUG_OUTPUT_ENABLED");
-	using FPermutationDomain = TShaderPermutationDomain<FDebugOutputEnabled>;
+	using FPermutationDomain = TShaderPermutationDomain<FUse16BitResultBuffer, FDebugOutputEnabled>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
@@ -356,8 +365,8 @@ public:
 
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Reservoir>, InReservoirs)
 
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint16_t>, RWNeighbourIndices)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint16_t>, RWEvaluationResults)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint16_t>, RWNeighbourIndices)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWByteAddressBuffer, RWEvaluationResults_ByteAddress)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWEvaluationIndirectionBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWByteAddressBuffer<uint>, RWIndirectionAllocator)
 
@@ -381,6 +390,10 @@ public:
 
 		OutEnvironment.CompilerFlags.Add(CFLAG_AllowRealTypes);
 		OutEnvironment.CompilerFlags.Add(CFLAG_InlineRayTracing);
+
+		FPermutationDomain Permutation(Parameters.PermutationId);
+		const TCHAR* ResultBufferType = Permutation.Get<FUse16BitResultBuffer>() ? TEXT("uint16_t") : TEXT("uint");
+		OutEnvironment.SetDefine(TEXT("RESULT_BUFFER_TYPE"), ResultBufferType);
 	}
 
 	static uint32 GetThreadGroupSize2D() { return 8; }
@@ -394,6 +407,14 @@ public:
 	DECLARE_GLOBAL_SHADER(FReSTIRSpatialReuse_EvaluateRGS);
 	SHADER_USE_ROOT_PARAMETER_STRUCT(FReSTIRSpatialReuse_EvaluateRGS, FReSTIRBaseRGS);
 
+	class FUse16BitResultBuffer : SHADER_PERMUTATION_BOOL("USE_16_BIT_RESULT_BUFFER");
+	using FPermutationDomain = TShaderPermutationDomain<FReSTIRBaseRGS::FMultipleBounces,
+														FReSTIRBaseRGS::FUseSurfaceContributions,
+														FReSTIRBaseRGS::FUseSER,
+														FReSTIRBaseRGS::FUseDispatchIndirect,
+														FReSTIRBaseRGS::FDebugOutputEnabled,
+														FUse16BitResultBuffer>;
+
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRMultiPassSpatialReuseCommonParameters, SpatialReuseCommon)
@@ -402,8 +423,17 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Bounce>, InExtraBounces)
 
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint>, EvaluationIndirectionBuffer)
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint16_t>, RWEvaluationResults)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint16_t>, RWEvaluationResults)
 	END_SHADER_PARAMETER_STRUCT()
+
+	static void ModifyCompilationEnvironment(const FGlobalShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)
+	{
+		FReSTIRBaseRGS::ModifyCompilationEnvironment(Parameters, OutEnvironment);
+
+		FPermutationDomain Permutation(Parameters.PermutationId);
+		const TCHAR* ResultBufferType = Permutation.Get<FUse16BitResultBuffer>() ? TEXT("uint16_t") : TEXT("uint");
+		OutEnvironment.SetDefine(TEXT("RESULT_BUFFER_TYPE"), ResultBufferType);
+	}
 };
 
 IMPLEMENT_GLOBAL_SHADER(FReSTIRSpatialReuse_EvaluateRGS, "/Plugin/HVPT/Private/ReSTIR/SpatialReuse_MultiPass.usf", "ReSTIRSpatialReuse_EvaluateRGS", SF_RayGen)
@@ -415,8 +445,9 @@ public:
 	SHADER_USE_PARAMETER_STRUCT(FReSTIRSpatialReuse_GatherAndReuseCS, FGlobalShader);
 
 	class FMultipleBounces : SHADER_PERMUTATION_BOOL("MULTIPLE_BOUNCES");
+	class FUse16BitResultBuffer: SHADER_PERMUTATION_BOOL("USE_16_BIT_RESULT_BUFFER");
 	class FDebugOutputEnabled : SHADER_PERMUTATION_BOOL("DEBUG_OUTPUT_ENABLED");
-	using FPermutationDomain = TShaderPermutationDomain<FMultipleBounces, FDebugOutputEnabled>;
+	using FPermutationDomain = TShaderPermutationDomain<FMultipleBounces, FUse16BitResultBuffer, FDebugOutputEnabled>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_REF(FViewUniformShaderParameters, View)
@@ -430,8 +461,8 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Reservoir>, InReservoirs)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Bounce>, InExtraBounces)
 
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint16_t>, NeighbourIndices)
-		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<uint16_t>, EvaluationResults)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint16_t>, NeighbourIndices)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint16_t>, EvaluationResults)
 
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Reservoir>, RWOutReservoirs)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Bounce>, RWOutExtraBounces)
@@ -456,6 +487,10 @@ public:
 
 		OutEnvironment.CompilerFlags.Add(CFLAG_AllowRealTypes);
 		OutEnvironment.CompilerFlags.Add(CFLAG_InlineRayTracing);
+
+		FPermutationDomain Permutation(Parameters.PermutationId);
+		const TCHAR* ResultBufferType = Permutation.Get<FUse16BitResultBuffer>() ? TEXT("uint16_t") : TEXT("uint");
+		OutEnvironment.SetDefine(TEXT("RESULT_BUFFER_TYPE"), ResultBufferType);
 	}
 
 	static uint32 GetThreadGroupSize2D() { return 8; }
@@ -555,7 +590,11 @@ void HVPT::PrepareRaytracingShadersReSTIR(const FViewInfo& View, const FHVPTView
 		AddShader.template operator()<FReSTIRCandidateEvaluateFRGS>(CreatePermutation<FReSTIRCandidateEvaluateFRGS>(State));
 	AddShader.template operator()<FReSTIRTemporalReuseRGS>(CreatePermutation<FReSTIRTemporalReuseRGS>(State));
 	if (CVarHVPTReSTIRMultiPassSpatialReuse.GetValueOnRenderThread())
-		AddShader.template operator()<FReSTIRSpatialReuse_EvaluateRGS>(CreatePermutation<FReSTIRSpatialReuse_EvaluateRGS>(State));
+	{
+		FReSTIRSpatialReuse_EvaluateRGS::FPermutationDomain Permutation = CreatePermutation<FReSTIRSpatialReuse_EvaluateRGS>(State);
+		Permutation.Set<FReSTIRSpatialReuse_EvaluateRGS::FUse16BitResultBuffer>(CVarHVPTReSTIRMultiPassSpatialReuse16BitBuffer.GetValueOnRenderThread());
+		AddShader.template operator()<FReSTIRSpatialReuse_EvaluateRGS>(Permutation);
+	}
 	else
 		AddShader.template operator()<FReSTIRSpatialReuseRGS>(CreatePermutation<FReSTIRSpatialReuseRGS>(State));
 	AddShader.template operator()<FReSTIRFinalShadingRGS>(CreatePermutation<FReSTIRFinalShadingRGS>(State));
@@ -985,6 +1024,11 @@ void HVPT::RenderWithReSTIRPathTracing(
 		}
 		else
 		{
+			bool b16BitResultBuffer = CVarHVPTReSTIRMultiPassSpatialReuse16BitBuffer.GetValueOnRenderThread();
+			size_t ResultBufferElementSize = b16BitResultBuffer ? sizeof(uint16) : sizeof(uint32);
+			EPixelFormat ResultBufferFormat = b16BitResultBuffer ? PF_R16_UINT : PF_R32_UINT;
+			uint32 ResultBufferClearValue = b16BitResultBuffer ? 0xFFFF : 0xFFFFFFFF;
+
 			// Spatial reuse in multiple passes to reduce thread divergence and share work among threads
 			// To make the memory requirements for transient buffers feasible, the number of spatial samples and spatial reuse radius have to be limited
 			float SpatialReuseRadius = FMath::Clamp(HVPT::GetSpatialReuseRadius(), 1.0f, 10.0f);
@@ -1012,7 +1056,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 			FRDGBufferRef NeighbourIndicesBuffer = GraphBuilder.CreateBuffer(
 				FRDGBufferDesc::CreateBufferDesc(sizeof(uint16), ReservoirsPerTile * NumSpatialSamples), TEXT("NeighbourIndices"));
 			FRDGBufferRef EvaluationResultsBuffer = GraphBuilder.CreateBuffer(
-				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), MaxEvaluationsPerTile), TEXT("EvaluationResults"));
+				FRDGBufferDesc::CreateBufferDesc(ResultBufferElementSize, MaxEvaluationsPerTile), TEXT("EvaluationResults"));
 			FRDGBufferRef EvaluationIndirectionBuffer = GraphBuilder.CreateBuffer(
 				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), IndirectionBufferElementCount), TEXT("EvaluationIndirection"));
 			FRDGBufferRef IndirectionBufferAllocator = GraphBuilder.CreateBuffer(
@@ -1051,7 +1095,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 				// Clear resources that need cleared (allocator + results buffer)
 				AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(NeighbourIndicesBuffer, PF_R16_UINT), 0);
-				AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(EvaluationResultsBuffer), HVPT_SPATIAL_REUSE_UNALLOCATED);
+				AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(EvaluationResultsBuffer, ResultBufferFormat), ResultBufferClearValue);
 				AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(IndirectionBufferAllocator), 0);
 
 				// Step 1: Choose neighbours for each reservoir.
@@ -1069,7 +1113,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 					PassParameters->InReservoirs = GraphBuilder.CreateSRV(ReservoirsA);
 
 					PassParameters->RWNeighbourIndices = GraphBuilder.CreateUAV(NeighbourIndicesBuffer, PF_R16_UINT);
-					PassParameters->RWEvaluationResults = GraphBuilder.CreateUAV(EvaluationResultsBuffer);
+					PassParameters->RWEvaluationResults_ByteAddress = GraphBuilder.CreateUAV(EvaluationResultsBuffer, ResultBufferFormat);
 					PassParameters->RWEvaluationIndirectionBuffer = GraphBuilder.CreateUAV(EvaluationIndirectionBuffer);
 					PassParameters->RWIndirectionAllocator = GraphBuilder.CreateUAV(IndirectionBufferAllocator);
 
@@ -1080,6 +1124,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 					}
 
 					FReSTIRSpatialReuse_ChooseNeighboursCS::FPermutationDomain Permutation;
+					Permutation.Set<FReSTIRSpatialReuse_ChooseNeighboursCS::FUse16BitResultBuffer>(b16BitResultBuffer);
 					Permutation.Set<FReSTIRSpatialReuse_ChooseNeighboursCS::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 					TShaderMapRef<FReSTIRSpatialReuse_ChooseNeighboursCS> ComputeShader(ShaderMap, Permutation);
 					FIntVector GroupCount = FComputeShaderUtils::GetGroupCount(static_cast<FIntPoint>(TileSize), FReSTIRSpatialReuse_ChooseNeighboursCS::GetThreadGroupSize2D());
@@ -1115,14 +1160,17 @@ void HVPT::RenderWithReSTIRPathTracing(
 						PassParameters->InExtraBounces = GraphBuilder.CreateSRV(ExtraBouncesA);
 
 					PassParameters->EvaluationIndirectionBuffer = GraphBuilder.CreateSRV(EvaluationIndirectionBuffer);
-					PassParameters->RWEvaluationResults = GraphBuilder.CreateUAV(EvaluationResultsBuffer);
+					PassParameters->RWEvaluationResults = GraphBuilder.CreateUAV(EvaluationResultsBuffer, ResultBufferFormat);
 
+					FReSTIRSpatialReuse_EvaluateRGS::FPermutationDomain Permutation = CreatePermutation<FReSTIRSpatialReuse_EvaluateRGS>(State);
+					Permutation.Set<FReSTIRSpatialReuse_EvaluateRGS::FUse16BitResultBuffer>(b16BitResultBuffer);
 					AddRaytracingPass<FReSTIRSpatialReuse_EvaluateRGS>(
 						GraphBuilder,
 						RDG_EVENT_NAME("EvaluatePHat"),
 						ViewInfo,
 						State,
 						PassParameters,
+						Permutation,
 						IndirectArguments
 					);
 				}
@@ -1144,7 +1192,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 						PassParameters->InExtraBounces = GraphBuilder.CreateSRV(ExtraBouncesA);
 
 					PassParameters->NeighbourIndices = GraphBuilder.CreateSRV(NeighbourIndicesBuffer, PF_R16_UINT);
-					PassParameters->EvaluationResults = GraphBuilder.CreateSRV(EvaluationResultsBuffer);
+					PassParameters->EvaluationResults = GraphBuilder.CreateSRV(EvaluationResultsBuffer, ResultBufferFormat);
 
 					PassParameters->RWOutReservoirs = GraphBuilder.CreateUAV(ReservoirsB);
 					if (HVPT::GetMaxBounces() > 1)
@@ -1158,6 +1206,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 					FReSTIRSpatialReuse_GatherAndReuseCS::FPermutationDomain Permutation;
 					Permutation.Set<FReSTIRSpatialReuse_GatherAndReuseCS::FMultipleBounces>(HVPT::GetMaxBounces() > 1);
+					Permutation.Set<FReSTIRSpatialReuse_GatherAndReuseCS::FUse16BitResultBuffer>(b16BitResultBuffer);
 					Permutation.Set<FReSTIRSpatialReuse_GatherAndReuseCS::FDebugOutputEnabled>(State.DebugFlags& HVPT_DEBUG_FLAG_ENABLE);
 					TShaderMapRef<FReSTIRSpatialReuse_GatherAndReuseCS> ComputeShader(ShaderMap, Permutation);
 					FIntVector GroupCount = FComputeShaderUtils::GetGroupCount(static_cast<FIntPoint>(TileSize), FReSTIRSpatialReuse_GatherAndReuseCS::GetThreadGroupSize2D());

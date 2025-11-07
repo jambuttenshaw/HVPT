@@ -131,7 +131,6 @@ struct FHVPT_DeferredSurfaceBounce
 
 // Multi-pass spatial reuse
 
-#define HVPT_SPATIAL_REUSE_UNALLOCATED 0xFFFFFFFF
 #define HVPT_SPATIAL_REUSE_NEIGHBOUR_TERMINATOR 0
 
 

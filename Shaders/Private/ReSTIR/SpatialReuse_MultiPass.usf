@@ -21,6 +21,10 @@
 #define MAX_SPATIAL_SAMPLES 8
 #endif
 
+#ifndef RESULT_BUFFER_TYPE
+#define RESULT_BUFFER_TYPE uint
+#endif
+
 
 // --- Common resources --- //
 
@@ -145,7 +149,7 @@ uint UnpackEvaluationIndirectionBufferElement(uint IndirectionBufferElement)
 // --- Kernels --- //
 
 RWBuffer<uint16_t> RWNeighbourIndices;
-RWStructuredBuffer<uint> RWEvaluationResults;
+RWByteAddressBuffer RWEvaluationResults_ByteAddress;
 RWStructuredBuffer<uint> RWEvaluationIndirectionBuffer;
 RWStructuredBuffer<uint> RWIndirectionAllocator;
 
@@ -160,12 +164,31 @@ int2 GenerateNeighbourhoodOffset(inout RandomSequence RandSequence)
 	return SpatialReuseRadius * UniformSampleDisk(RandValue);
 }
 
+// Returns true if this was the first time this index was flagged for evaluation
+// It does this by using atomics to set bits to 0 at indices where evaluation is required
 bool FlagPathForEvaluationIfRequired(uint EvaluationBufferIndex)
 {
-	// Check if it has already been allocated
 	uint PrevValue;
-	InterlockedExchange(RWEvaluationResults[EvaluationBufferIndex], 0, PrevValue);
-	return PrevValue == HVPT_SPATIAL_REUSE_UNALLOCATED;
+#if USE_16_BIT_RESULT_BUFFER
+	// Check if it has already been allocated
+	// Can only do atomics with 32 bit types - so need to do a bitmask op on 32 bits and compare PrevValue to our bitmask
+	uint IndexLocationInBytes = EvaluationBufferIndex * sizeof(uint16_t);
+	// Round down to nearest 4 byte boundary
+	uint AccessLocationInBytes = IndexLocationInBytes & ~3;
+
+	// Construct a mask for which bits we want to set
+	uint Mask = ~(0xFFFF << ((IndexLocationInBytes - AccessLocationInBytes) * 8));
+
+	RWEvaluationResults_ByteAddress.InterlockedAnd(IndexLocationInBytes, Mask, PrevValue);
+
+	// Compare against previous value to determine if this was the first time this index was allocated
+	bool bChanged = (PrevValue | Mask) != Mask;
+	return bChanged;
+#else
+	uint IndexLocationInBytes = EvaluationBufferIndex * sizeof(RESULT_BUFFER_TYPE);
+	RWEvaluationResults_ByteAddress.InterlockedExchange(IndexLocationInBytes, 0, PrevValue);
+	return PrevValue != 0;
+#endif
 }
 
 void AllocateReservoirDomainPairEvaluation(int2 ReservoirPixelCoord, int2 DomainPixelCoord, FHVPT_Reservoir Tap)
@@ -269,6 +292,7 @@ void ReSTIRSpatialReuse_ChooseNeighboursCS(uint3 DTid : SV_DispatchThreadID)
 
 
 StructuredBuffer<uint> EvaluationIndirectionBuffer;
+RWBuffer<RESULT_BUFFER_TYPE> RWEvaluationResults;
 
 RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuse_EvaluateRGS)
 {
@@ -315,12 +339,29 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRSpatialReuse_EvaluateRGS)
 		P_y = 0.0f;
 	}
 
-	RWEvaluationResults[LinearEvaluationBufferIndex] = asuint(P_y);
+	RWEvaluationResults[LinearEvaluationBufferIndex] =
+#if USE_16_BIT_RESULT_BUFFER
+		f32tof16(P_y)
+#else
+		asuint(P_y)
+#endif
+	;
 }
 
 
 Buffer<uint16_t> NeighbourIndices;
-StructuredBuffer<uint> EvaluationResults;
+Buffer<RESULT_BUFFER_TYPE> EvaluationResults;
+
+float LoadPy(int2 Reservoir, int2 Domain)
+{
+	uint ResultBufferIndex = GetResultBufferIndex(Reservoir, Domain);
+	RESULT_BUFFER_TYPE Data = EvaluationResults[ResultBufferIndex];
+#if USE_16_BIT_RESULT_BUFFER
+	return f16tof32(Data);
+#else
+	return asfloat(Data);
+#endif
+}
 
 [numthreads(THREADGROUP_SIZE_2D, THREADGROUP_SIZE_2D, 1)]
 void ReSTIRSpatialReuse_GatherAndReuseCS(uint3 DTid : SV_DispatchThreadID)
@@ -377,9 +418,7 @@ void ReSTIRSpatialReuse_GatherAndReuseCS(uint3 DTid : SV_DispatchThreadID)
 
 		if (i > 0) // Don't resample canonical - its already in this domain
 		{
-			uint ResultBufferIndex = GetResultBufferIndex(TapPos, PixelCoord);
-			float P_y_hat = asfloat(EvaluationResults[ResultBufferIndex]);
-
+			float P_y_hat = LoadPy(TapPos, PixelCoord);
 			HVPT_ResampleNeighbour(Tap, P_y_hat, RandSequence);
 		}
 
@@ -410,8 +449,7 @@ void ReSTIRSpatialReuse_GatherAndReuseCS(uint3 DTid : SV_DispatchThreadID)
 				else // Reservoir i in j's domain
 				{
 					// Load P_y
-					uint ResultBufferIndex = GetResultBufferIndex(TapPos, TapPos_j);
-					float P_y = asfloat(EvaluationResults[ResultBufferIndex]);
+					float P_y = LoadPy(TapPos, TapPos_j);
 					PSum += P_y * Tap_j.M;
 				}
 			}
