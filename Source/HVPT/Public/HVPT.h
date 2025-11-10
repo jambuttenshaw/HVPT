@@ -49,6 +49,7 @@ namespace HVPT
 	HVPT_API float GetTemporalReuseHistoryThreshold();
 	HVPT_API bool GetTemporalReprojectionEnabled();
 	HVPT_API bool GetSpatialReuseEnabled();
+	HVPT_API bool GetMultiPassSpatialReuseEnabled();
 	HVPT_API int32 GetNumSpatialReuseSamples();
 	HVPT_API float GetSpatialReuseRadius();
 	HVPT_API bool GetSpatialReuseMISEnabled();

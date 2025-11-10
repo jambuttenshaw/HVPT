@@ -141,18 +141,19 @@ struct FHVPT_DeferredSurfaceBounce
 // Debug view modes are placed into bottom 8 bits (giving 256 possible view modes)
 
 // Debug flags
-#define HVPT_DEBUG_FLAG_ENABLE					0x00000100
+#define HVPT_DEBUG_FLAG_ENABLE	0x00000100
 
 // Debug view modes
-#define HVPT_DEBUG_VIEW_MODE_NUM_BOUNCES		0x00
-#define HVPT_DEBUG_VIEW_MODE_PATH_TYPE			0x01		// Scattering vs Emission vs Surface
-#define HVPT_DEBUG_VIEW_MODE_LIGHT_ID			0x02
-#define HVPT_DEBUG_VIEW_MODE_TEMPORAL_REUSE		0x03		// Whether temporal sample was selected
-#define HVPT_DEBUG_VIEW_MODE_SPATIAL_REUSE		0x04		// Whether spatial sample was selected
-#define HVPT_DEBUG_VIEW_MODE_FIREFLY_DETECTION	0x05		// Visualize when sum in reservoirs is very high to detect fireflies
-#define HVPT_DEBUG_VIEW_MODE_REPROJECTION		0x06		// Visualizes difference between pixel position and reprojected pixel position
+#define HVPT_DEBUG_VIEW_MODE_NUM_BOUNCES				0x00
+#define HVPT_DEBUG_VIEW_MODE_PATH_TYPE					0x01		// Scattering vs Emission vs Surface
+#define HVPT_DEBUG_VIEW_MODE_LIGHT_ID					0x02
+#define HVPT_DEBUG_VIEW_MODE_TEMPORAL_REUSE				0x03		// Whether temporal sample was selected
+#define HVPT_DEBUG_VIEW_MODE_SPATIAL_REUSE				0x04		// Whether spatial sample was selected
+#define HVPT_DEBUG_VIEW_MODE_FIREFLY_DETECTION			0x05		// Visualize when sum in reservoirs is very high to detect fireflies
+#define HVPT_DEBUG_VIEW_MODE_REPROJECTION				0x06		// Visualizes difference between pixel position and reprojected pixel position
+#define HVPT_DEBUG_VIEW_MODE_MULTI_PASS_OVERALLOCATION	0x07		// Visualizes when multi-pass indirection buffer has been overallocated
 
-#define HVPT_DEBUG_VIEW_MODE_CUSTOM				0xFF		// Used for temporary debug visualization
+#define HVPT_DEBUG_VIEW_MODE_CUSTOM						0xFF		// Used for temporary debug visualization
 
 
 #ifdef __cplusplus

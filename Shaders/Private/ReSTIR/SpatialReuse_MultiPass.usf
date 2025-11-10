@@ -153,6 +153,9 @@ RWByteAddressBuffer RWEvaluationResults_ByteAddress;
 RWBuffer<uint> RWEvaluationIndirectionBuffer;
 RWStructuredBuffer<uint> RWIndirectionAllocator;
 
+uint IndirectionAllocatorCapacity;
+
+
 bool IsWithinRange(int2 pos, uint2 range)
 {
 	return all(pos >= 0) && all(pos < range);
@@ -177,7 +180,7 @@ bool FlagPathForEvaluationIfRequired(uint EvaluationBufferIndex)
 	uint AccessLocationInBytes = IndexLocationInBytes & ~3;
 
 	// Construct a mask for which bits we want to set
-	uint Mask = ~(0xFFFF << ((IndexLocationInBytes - AccessLocationInBytes) * 8));
+	uint Mask = ~(0xFFFFU << ((IndexLocationInBytes - AccessLocationInBytes) * 8));
 
 	RWEvaluationResults_ByteAddress.InterlockedAnd(IndexLocationInBytes, Mask, PrevValue);
 
@@ -191,7 +194,12 @@ bool FlagPathForEvaluationIfRequired(uint EvaluationBufferIndex)
 #endif
 }
 
-void AllocateReservoirDomainPairEvaluation(int2 ReservoirPixelCoord, int2 DomainPixelCoord, FHVPT_Reservoir Tap)
+void AllocateReservoirDomainPairEvaluation(
+	int2 PixelCoord,
+	int2 ReservoirPixelCoord, 
+	int2 DomainPixelCoord, 
+	FHVPT_Reservoir Tap
+)
 {
 	uint EvaluationBufferIndex = GetResultBufferIndex(ReservoirPixelCoord, DomainPixelCoord);
 
@@ -200,12 +208,25 @@ void AllocateReservoirDomainPairEvaluation(int2 ReservoirPixelCoord, int2 Domain
 		uint Index;
 		InterlockedAdd(RWIndirectionAllocator[0], 1, Index);
 
-		uint PackedData = PackEvaluationIndirectionBufferElement(
-			Tap.GetSurfacePath(),
-			Tap.GetNumExtraBounces(),
-			EvaluationBufferIndex
-		);
-		RWEvaluationIndirectionBuffer[Index] = PackedData;
+		if (Index < IndirectionAllocatorCapacity)
+		{
+			uint PackedData = PackEvaluationIndirectionBufferElement(
+				Tap.GetSurfacePath(),
+				Tap.GetNumExtraBounces(),
+				EvaluationBufferIndex
+			);
+			RWEvaluationIndirectionBuffer[Index] = PackedData;
+		}
+		else
+		{
+			InterlockedExchange(RWIndirectionAllocator[0], IndirectionAllocatorCapacity, Index);
+#if DEBUG_OUTPUT_ENABLED
+			if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_MULTI_PASS_OVERALLOCATION)
+			{
+				RWDebugTexture[PixelCoord] = float3(1, 0, 1);
+			}
+#endif
+		}
 	}
 }
 
@@ -221,6 +242,14 @@ void ReSTIRSpatialReuse_ChooseNeighboursCS(uint3 DTid : SV_DispatchThreadID)
 	{
 		return;
 	}
+
+#if DEBUG_OUTPUT_ENABLED
+	// Successful allocations will remain green
+	if ((DebugFlags & 0xFF) == HVPT_DEBUG_VIEW_MODE_MULTI_PASS_OVERALLOCATION)
+	{
+		RWDebugTexture[PixelCoord] = float3(0, 1, 0);
+	}
+#endif
 
 	RandomSequence RandSequence = (RandomSequence) 0;
 	RandomSequence_Initialize(RandSequence, HVPT_GetReservoirIndex((uint2) PixelCoord), TemporalSeed);
@@ -284,7 +313,7 @@ void ReSTIRSpatialReuse_ChooseNeighboursCS(uint3 DTid : SV_DispatchThreadID)
 				int2 PixelCoord_j = PixelCoord + Offset_j;
 
 				// Evaluate reservoir i in domain j
-				AllocateReservoirDomainPairEvaluation(PixelCoord_i, PixelCoord_j, Tap);
+				AllocateReservoirDomainPairEvaluation(PixelCoord, PixelCoord_i, PixelCoord_j, Tap);
 			}
 		}
 	}

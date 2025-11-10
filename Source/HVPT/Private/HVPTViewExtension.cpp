@@ -403,8 +403,7 @@ void HVPT::DrawDebugOverlay(
 		{
 			float X = 20;
 			float Y = 20;
-			const float YStep = 14;
-			const float ColumnWidth = 200;
+			constexpr float YStep = 14;
 
 			FString Line;
 
@@ -423,10 +422,11 @@ void HVPT::DrawDebugOverlay(
 				TEXT("Num Bounces"),
 				TEXT("Path Type"),
 				TEXT("Light ID"),
-				TEXT("Temporal Reuse"),
-				TEXT("Spatial Reuse"),
+				TEXT("Temporal Reuse (TR)"),
+				TEXT("Spatial Reuse (SR)"),
 				TEXT("Fireflies"),
-				TEXT("Reprojection")
+				TEXT("Reprojection"),
+				TEXT("Multi-Pass SR Overalloc"),
 			};
 
 			{
@@ -494,6 +494,12 @@ void HVPT::DrawDebugOverlay(
 				Line = FString::Printf(TEXT("Temporal Reprojection=%s"), bEnabled ? TEXT("True") : TEXT("False"));
 				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), bEnabled ? FLinearColor::Green : FLinearColor::Red);
 			} break;
+			case HVPT_DEBUG_VIEW_MODE_MULTI_PASS_OVERALLOCATION:
+			{
+				bool bEnabled = HVPT::GetSpatialReuseEnabled() && HVPT::GetMultiPassSpatialReuseEnabled();
+				Line = FString::Printf(TEXT("Multi-Pass Spatial Reuse=%s"), bEnabled ? TEXT("True") : TEXT("False"));
+				Canvas.DrawShadowedString(X, Y += YStep, *Line, GetStatsFont(), bEnabled ? FLinearColor::Green : FLinearColor::Red);
+			}
 			default:
 				break;
 			}

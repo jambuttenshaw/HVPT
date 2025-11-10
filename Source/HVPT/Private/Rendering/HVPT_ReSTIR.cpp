@@ -48,10 +48,10 @@ static TAutoConsoleVariable<int32> CVarHVPTReSTIRDeferredBounceBufferSize(
 	ECVF_RenderThreadSafe
 );
 
-static TAutoConsoleVariable<bool> CVarHVPTReSTIRMultiPassSpatialReuse(
-	TEXT("r.HVPT.ReSTIR.SpatialReuse.MultiPass"),
-	true,
-	TEXT("Whether to use multi-pass pipeline for spatial reuse."),
+static TAutoConsoleVariable<int32> CVarHVPTReSTIRMultiPassSpatialReuseTileSize(
+	TEXT("r.HVPT.ReSTIR.SpatialReuse.MultiPass.TileSize"),
+	512,
+	TEXT("Tile size used for multi-pass spatial reuse. Powers of two work best. Bigger requires larger transient resources but reduces redundant path evaluations."),
 	ECVF_RenderThreadSafe
 );
 
@@ -379,6 +379,8 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWByteAddressBuffer, RWEvaluationResults_ByteAddress)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWEvaluationIndirectionBuffer)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWIndirectionAllocator)
+
+		SHADER_PARAMETER(uint32, IndirectionAllocatorCapacity)
 
 		// Debug tools
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float3>, RWDebugTexture)
@@ -798,7 +800,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 	uint32 MaxNumPasses = 4;
 	MaxNumPasses += CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread() ? 1 : 0;
 	MaxNumPasses += (State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE) ? 1 : 0;
-	MaxNumPasses += CVarHVPTReSTIRMultiPassSpatialReuse.GetValueOnRenderThread() ? 24 : 0; // TODO: Actually calculate how many passes based off number of tiles
+	MaxNumPasses += HVPT::GetMultiPassSpatialReuseEnabled() ? 24 : 0; // TODO: Actually calculate how many passes based off number of tiles
 	uint32 TemporalSeedOffset = 0;
 	auto PopulateCommonParameters = [&](FReSTIRCommonParameters* Parameters)
 		{
@@ -1004,7 +1006,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 		if (HVPT::GetMaxBounces() > 1)
 			AddClearUAVFloatPass(GraphBuilder, GraphBuilder.CreateUAV(ExtraBouncesB), 0.0f);
 
-		if (!CVarHVPTReSTIRMultiPassSpatialReuse.GetValueOnRenderThread())
+		if (!HVPT::GetMultiPassSpatialReuseEnabled())
 		{
 			FReSTIRSpatialReuseRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRSpatialReuseRGS::FParameters>();
 			PopulateCommonParameters(&PassParameters->Common);
@@ -1019,7 +1021,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 			if (HVPT::GetMaxBounces() > 1)
 				PassParameters->RWOutExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesB);
 
-			PassParameters->NumSpatialSamples = FMath::Clamp(HVPT::GetNumSpatialReuseSamples(), 0, kReSTIRMaxSpatialSamples);
+			PassParameters->NumSpatialSamples = FMath::Clamp(HVPT::GetNumSpatialReuseSamples(), 1, kReSTIRMaxSpatialSamples);
 			PassParameters->SpatialReuseRadius = HVPT::GetSpatialReuseRadius();
 			PassParameters->bTalbotMIS = HVPT::GetSpatialReuseMISEnabled();
 
@@ -1041,16 +1043,16 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 			// Spatial reuse in multiple passes to reduce thread divergence and share work among threads
 			// To make the memory requirements for transient buffers feasible, the number of spatial samples and spatial reuse radius have to be limited
-			float SpatialReuseRadius = FMath::Clamp(HVPT::GetSpatialReuseRadius(), 1.0f, 10.0f);
-			int32 SpatialReuseRadiusI = FMath::CeilToInt(SpatialReuseRadius);
-			uint32 NumSpatialSamples = FMath::Clamp(HVPT::GetNumSpatialReuseSamples(), 1, 8);
+			float SpatialReuseRadius = HVPT::GetSpatialReuseRadius();
+			int32 SpatialReuseRadiusI = FMath::CeilToInt(SpatialReuseRadius) - 1;
+			uint32 NumSpatialSamples = FMath::Clamp(HVPT::GetNumSpatialReuseSamples(), 1, kReSTIRMaxSpatialSamples);
 
 			// Calculate number of tiles / size of tiles based on view size
 			const auto& ViewExtent = ViewInfo.ViewRect.Size();
-			// The view rect will be processed in 512x512 tiles. These tiles will be surrounded by a (up to) 10px buffer zone around each edge.
-			// Threads will be dispatched for the 512x512 tile, but they may require evaluating domains outside of this rect, so the transient buffers must be big enough for this
-			constexpr int32 TileW = 512;
-			constexpr int32 ReservoirsPerTile = TileW * TileW;
+			// The view rect will be processed in tiles. These tiles will be surrounded by a (up to) 10px buffer zone around each edge.
+			// Threads will be dispatched for the tile, but they may require evaluating domains outside of this rect, so the transient buffers must be big enough for this
+			int32 TileW = CVarHVPTReSTIRMultiPassSpatialReuseTileSize.GetValueOnRenderThread();
+			const int32 ReservoirsPerTile = TileW * TileW;
 
 			const int32 TileW_Buffered = TileW + 2 * SpatialReuseRadiusI;
 			const int32 SqrtDomainsPerReservoir = (2 * SpatialReuseRadiusI + 1);
@@ -1126,6 +1128,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 					PassParameters->RWEvaluationResults_ByteAddress = GraphBuilder.CreateUAV(EvaluationResultsBuffer, ResultBufferFormat);
 					PassParameters->RWEvaluationIndirectionBuffer = GraphBuilder.CreateUAV(EvaluationIndirectionBuffer, PF_R32_UINT);
 					PassParameters->RWIndirectionAllocator = GraphBuilder.CreateUAV(IndirectionBufferAllocator);
+
+					PassParameters->IndirectionAllocatorCapacity = IndirectionBufferElementCount;
 
 					if (State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE)
 					{
@@ -1260,8 +1264,11 @@ void HVPT::RenderWithReSTIRPathTracing(
 		uint64 NumBytes = static_cast<uint64>(ReservoirsB->Desc.BytesPerElement * ReservoirsB->Desc.NumElements);
 		AddCopyBufferPass(GraphBuilder, ReservoirsB, 0, ReservoirsA, 0, NumBytes);
 
-		NumBytes = static_cast<uint64>(ExtraBouncesB->Desc.BytesPerElement * ExtraBouncesB->Desc.NumElements);
-		AddCopyBufferPass(GraphBuilder, ExtraBouncesB, 0, ExtraBouncesA, 0, NumBytes);
+		if (HVPT::GetMaxBounces() > 1)
+		{
+			NumBytes = static_cast<uint64>(ExtraBouncesB->Desc.BytesPerElement * ExtraBouncesB->Desc.NumElements);
+			AddCopyBufferPass(GraphBuilder, ExtraBouncesB, 0, ExtraBouncesA, 0, NumBytes);
+		}
 	}
 
 	// Final Shading

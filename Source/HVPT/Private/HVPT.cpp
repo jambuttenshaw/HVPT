@@ -146,6 +146,13 @@ static TAutoConsoleVariable<bool> CVarHVPTReSTIRSpatialReuseMIS(
 	ECVF_RenderThreadSafe
 );
 
+static TAutoConsoleVariable<bool> CVarHVPTReSTIRMultiPassSpatialReuse(
+	TEXT("r.HVPT.ReSTIR.SpatialReuse.MultiPass"),
+	true,
+	TEXT("Whether to use multi-pass pipeline for spatial reuse."),
+	ECVF_RenderThreadSafe
+);
+
 
 static TAutoConsoleVariable<int32> CVarHVPTTransmittanceMode(
 	TEXT("r.HVPT.TransmittanceMode"),
@@ -413,6 +420,11 @@ namespace HVPT
 	bool GetSpatialReuseEnabled()
 	{
 		return GetNumSpatialReuseSamples() > 0;
+	}
+
+	bool GetMultiPassSpatialReuseEnabled()
+	{
+		return CVarHVPTReSTIRMultiPassSpatialReuse.GetValueOnRenderThread();
 	}
 
 	int32 GetNumInitialCandidates()
