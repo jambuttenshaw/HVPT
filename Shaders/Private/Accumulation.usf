@@ -38,7 +38,9 @@ void HVPT_AccumulateCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	for (uint i = 0; i < 4; i++)
 	{
 		Sum = asdouble(SumLo[i], SumHi[i]);
+#if !(PAUSE_ACCUMULATION)
 		Sum += (double) CurrentVal[i];
+#endif
 		asuint(Sum, SumLo[i], SumHi[i]);
 		Output[i] = (float) (Sum / (double) (NumAccumulatedSamples + 1));
 	}
