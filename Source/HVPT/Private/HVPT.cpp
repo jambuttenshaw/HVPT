@@ -120,8 +120,8 @@ static TAutoConsoleVariable<bool> CVarHVPTReSTIRTemporalReuseMIS(
 
 static TAutoConsoleVariable<float> CVarHVPTReSTIRTemporalReuseHistoryThreshold(
 	TEXT("r.HVPT.ReSTIR.TemporalReuse.HistoryThreshold"),
-	4.0f,
-	TEXT("Threshold on weight for temporal samples to prevent infinite reuse (Default = 4.0f)."),
+	2.0f,
+	TEXT("Threshold on weight for temporal samples to prevent infinite reuse."),
 	ECVF_RenderThreadSafe
 );
 
