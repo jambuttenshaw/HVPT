@@ -19,7 +19,8 @@ public:
 
 		SHADER_PARAMETER(int, NumAccumulatedSamples)
 
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWTemporalAccumulationTexture)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWTemporalAccumulationTexture_Hi)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, RWTemporalAccumulationTexture_Lo)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float3>, RWRadianceTexture)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, RWFeatureTexture)
 	END_SHADER_PARAMETER_STRUCT()
@@ -56,7 +57,8 @@ void HVPT::Accumulate(
 
 	PassParameters->NumAccumulatedSamples = State.AccumulatedSampleCount;
 
-	PassParameters->RWTemporalAccumulationTexture = GraphBuilder.CreateUAV(State.TemporalAccumulationTexture);
+	PassParameters->RWTemporalAccumulationTexture_Hi = GraphBuilder.CreateUAV(State.TemporalAccumulationTexture_Hi);
+	PassParameters->RWTemporalAccumulationTexture_Lo = GraphBuilder.CreateUAV(State.TemporalAccumulationTexture_Lo);
 	PassParameters->RWRadianceTexture = GraphBuilder.CreateUAV(State.RadianceTexture);
 	PassParameters->RWFeatureTexture = GraphBuilder.CreateUAV(State.FeatureTexture);
 

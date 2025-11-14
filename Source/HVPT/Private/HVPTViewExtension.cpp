@@ -158,9 +158,11 @@ void FHVPTViewExtension::PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuild
 	{
 		ViewState->TemporalFeatureTexture = GraphBuilder.RegisterExternalTexture(ViewState->FeatureRT);
 	}
-	if (ViewState->TemporalAccumulationRT)
+	if (ViewState->TemporalAccumulationRT_Hi)
 	{
-		ViewState->TemporalAccumulationTexture = GraphBuilder.RegisterExternalTexture(ViewState->TemporalAccumulationRT);
+		check(ViewState->TemporalAccumulationRT_Lo); // High shouldn't exist without low
+		ViewState->TemporalAccumulationTexture_Hi = GraphBuilder.RegisterExternalTexture(ViewState->TemporalAccumulationRT_Hi);
+		ViewState->TemporalAccumulationTexture_Lo = GraphBuilder.RegisterExternalTexture(ViewState->TemporalAccumulationRT_Lo);
 	}
 
 	// Build voxel grid if required
@@ -257,27 +259,36 @@ void FHVPTViewExtension::PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuild
 	if (HVPT::ShouldAccumulate())
 	{
 		const auto& PrevView = ViewInfo.PrevViewInfo;
-		bool bViewChanged = ViewInfo.ViewRect != PrevView.ViewRect || !ViewInfo.ViewMatrices.GetViewProjectionMatrix().Equals(PrevView.ViewMatrices.GetViewProjectionMatrix(), 0.1);
+		bool bViewChanged = ViewInfo.ViewRect != PrevView.ViewRect || !ViewInfo.ViewMatrices.GetViewProjectionMatrix().Equals(PrevView.ViewMatrices.GetViewProjectionMatrix(), 0.5);
 
 		FRDGTextureDesc RadianceTextureDesc = ViewState->RadianceTexture->Desc;
 		if (bViewChanged || 
-			(ViewState->TemporalAccumulationTexture && RadianceTextureDesc.Extent != ViewState->TemporalAccumulationTexture->Desc.Extent))
+			(ViewState->TemporalAccumulationTexture_Hi && RadianceTextureDesc.Extent != ViewState->TemporalAccumulationTexture_Hi->Desc.Extent))
 		{
-			ViewState->TemporalAccumulationTexture = nullptr;
+			// Low should match high
+			if (ViewState->TemporalAccumulationTexture_Hi)
+			{
+				check(ViewState->TemporalAccumulationTexture_Lo && ViewState->TemporalAccumulationTexture_Hi->Desc.Extent == ViewState->TemporalAccumulationTexture_Lo->Desc.Extent);
+			}
+			ViewState->TemporalAccumulationTexture_Hi = nullptr;
+			ViewState->TemporalAccumulationTexture_Lo = nullptr;
 			ViewState->AccumulatedSampleCount = 0;
 		}
 
-		if (!ViewState->TemporalAccumulationTexture)
+		if (!ViewState->TemporalAccumulationTexture_Hi)
 		{
-			// Create temporal accumulation texture
-			ViewState->TemporalAccumulationTexture = GraphBuilder.CreateTexture(
-				FRDGTextureDesc::Create2D(RadianceTextureDesc.Extent, PF_A32B32G32R32F, FClearValueBinding::Black, ETextureCreateFlags::ShaderResource | ETextureCreateFlags::UAV),
-				TEXT("HVPT.TemporalAccumulation"));
+			check(!ViewState->TemporalAccumulationTexture_Lo);
+
+			// Create temporal accumulation textures
+			const auto Desc = FRDGTextureDesc::Create2D(RadianceTextureDesc.Extent, PF_A32B32G32R32F, FClearValueBinding::Black, ETextureCreateFlags::ShaderResource | ETextureCreateFlags::UAV);
+			ViewState->TemporalAccumulationTexture_Hi = GraphBuilder.CreateTexture(Desc, TEXT("HVPT.TemporalAccumulationHi"));
+			ViewState->TemporalAccumulationTexture_Lo = GraphBuilder.CreateTexture(Desc, TEXT("HVPT.TemporalAccumulationLo"));
 		}
 
 		if (ViewState->AccumulatedSampleCount == 0)
 		{
-			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ViewState->TemporalAccumulationTexture), 0.0f);
+			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ViewState->TemporalAccumulationTexture_Hi), 0.0f);
+			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ViewState->TemporalAccumulationTexture_Lo), 0.0f);
 		}
 
 		HVPT::Accumulate(
@@ -349,17 +360,25 @@ void FHVPTViewExtension::PostRenderView_RenderThread(FRDGBuilder& GraphBuilder, 
 		GraphBuilder.QueueTextureExtraction(ViewState->FeatureTexture, &ViewState->FeatureRT);
 	else
 		ViewState->FeatureRT = nullptr;
-	if (ViewState->TemporalAccumulationTexture)
-		GraphBuilder.QueueTextureExtraction(ViewState->TemporalAccumulationTexture, &ViewState->TemporalAccumulationRT);
+	if (ViewState->TemporalAccumulationTexture_Hi)
+	{
+		check(ViewState->TemporalAccumulationTexture_Lo);
+		GraphBuilder.QueueTextureExtraction(ViewState->TemporalAccumulationTexture_Hi, &ViewState->TemporalAccumulationRT_Hi);
+		GraphBuilder.QueueTextureExtraction(ViewState->TemporalAccumulationTexture_Lo, &ViewState->TemporalAccumulationRT_Lo);
+	}
 	else
-		ViewState->TemporalAccumulationRT = nullptr;
+	{
+		ViewState->TemporalAccumulationRT_Hi = nullptr;
+		ViewState->TemporalAccumulationRT_Lo = nullptr;
+	}
 	if (HVPT::GetFreezeFrame() && ViewState->RadianceTexture)
 		GraphBuilder.QueueTextureExtraction(ViewState->RadianceTexture, &ViewState->RadianceRT);
 	else
 		ViewState->RadianceRT = nullptr;
 
 	// Clear will-be-dangling (once RDG has executed) pointers (this view state should not be accessed across frames)
-	ViewState->TemporalAccumulationTexture = nullptr;
+	ViewState->TemporalAccumulationTexture_Hi = nullptr;
+	ViewState->TemporalAccumulationTexture_Lo = nullptr;
 	ViewState->RadianceTexture = nullptr;
 	ViewState->FeatureTexture = nullptr;
 	ViewState->TemporalFeatureTexture = nullptr;

@@ -12,7 +12,8 @@ struct FHVPTViewState
 	FRDGTextureRef FeatureTexture = nullptr;
 
 	FRDGTextureRef TemporalFeatureTexture = nullptr;
-	FRDGTextureRef TemporalAccumulationTexture = nullptr;
+	FRDGTextureRef TemporalAccumulationTexture_Hi = nullptr;
+	FRDGTextureRef TemporalAccumulationTexture_Lo = nullptr;
 
 	FRDGTextureRef DepthBufferCopy = nullptr;
 
@@ -24,7 +25,8 @@ struct FHVPTViewState
 
 	// Cached resources used between frames
 
-	TRefCountPtr<IPooledRenderTarget> TemporalAccumulationRT = nullptr;
+	TRefCountPtr<IPooledRenderTarget> TemporalAccumulationRT_Hi = nullptr;
+	TRefCountPtr<IPooledRenderTarget> TemporalAccumulationRT_Lo = nullptr;
 
 	TRefCountPtr<FRDGPooledBuffer> ReSTIRReservoirCache = nullptr;
 	TRefCountPtr<FRDGPooledBuffer> ReSTIRExtraBounceCache = nullptr;

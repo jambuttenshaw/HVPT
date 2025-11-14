@@ -8,7 +8,9 @@
 // The number of samples that are accumulated in the history so far, so the new radiance texture's contribution can be correctly weighted
 int NumAccumulatedSamples;
 
-RWTexture2D<float4> RWTemporalAccumulationTexture;
+RWTexture2D<float4> RWTemporalAccumulationTexture_Lo;
+RWTexture2D<float4> RWTemporalAccumulationTexture_Hi;
+
 RWTexture2D<float3> RWRadianceTexture;
 RWTexture2D<float2> RWFeatureTexture;
 
@@ -27,10 +29,23 @@ void HVPT_AccumulateCS(uint3 DispatchThreadId : SV_DispatchThreadID)
 	float2 CurrentFeature = RWFeatureTexture[PixelCoord];
 	float4 CurrentVal = float4(CurrentRadiance, CurrentFeature.x);
 
-	float4 Sum = RWTemporalAccumulationTexture[PixelCoord] + CurrentVal;
-	float4 Output = Sum / (NumAccumulatedSamples + 1);
+	float4 SumLo = RWTemporalAccumulationTexture_Lo[PixelCoord];
+	float4 SumHi = RWTemporalAccumulationTexture_Hi[PixelCoord];
 
-	RWTemporalAccumulationTexture[PixelCoord] = Sum;
+	double Sum;
+	float4 Output;
+
+	for (uint i = 0; i < 4; i++)
+	{
+		Sum = asdouble(SumLo[i], SumHi[i]);
+		Sum += (double) CurrentVal[i];
+		asuint(Sum, SumLo[i], SumHi[i]);
+		Output[i] = (float) (Sum / (double) (NumAccumulatedSamples + 1));
+	}
+	
+	RWTemporalAccumulationTexture_Lo[PixelCoord] = SumLo;
+	RWTemporalAccumulationTexture_Hi[PixelCoord] = SumHi;
+
 	RWRadianceTexture[PixelCoord] = Output.xyz;
 	RWFeatureTexture[PixelCoord] = float2(Output.w, CurrentFeature.y);
 }
