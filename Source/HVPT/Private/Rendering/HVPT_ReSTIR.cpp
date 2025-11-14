@@ -79,6 +79,13 @@ static TAutoConsoleVariable<bool> CVarHVPTReSTIRMultiPassSpatialReuse16BitBuffer
 	ECVF_RenderThreadSafe
 );
 
+static TAutoConsoleVariable<float> CVarHVPTReSTIRMaxPathIntensity(
+	TEXT("r.HVPT.ReSTIR.MaxPathIntensity"),
+	10.0f,
+	TEXT("Maximum path intensity to prevent fireflies at cost of introducing bias."),
+	ECVF_RenderThreadSafe
+);
+
 
 static bool DeferSurfaceHits()
 {
@@ -518,6 +525,8 @@ public:
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
+
+		SHADER_PARAMETER(float, MaxPathIntensity)
 
 		// Input reservoirs
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Reservoir>, CurrentReservoirs)
@@ -1277,6 +1286,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 		FReSTIRFinalShadingRGS::FParameters* PassParameters = GraphBuilder.AllocParameters<FReSTIRFinalShadingRGS::FParameters>();
 		PopulateCommonParameters(&PassParameters->Common);
+
+		PassParameters->MaxPathIntensity = CVarHVPTReSTIRMaxPathIntensity.GetValueOnRenderThread();
 
 		PassParameters->CurrentReservoirs = GraphBuilder.CreateSRV(ReservoirsB);
 		if (HVPT::GetMaxBounces() > 1)

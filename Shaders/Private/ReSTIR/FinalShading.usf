@@ -14,6 +14,8 @@
 
 uint TemporalSeed;
 
+float MaxPathIntensity;
+
 StructuredBuffer<FHVPT_Reservoir> CurrentReservoirs;
 StructuredBuffer<FHVPT_Bounce> ExtraBounces;
 
@@ -68,6 +70,12 @@ void ReSTIRFinalShading_Main(uint2 PixelCoord, uint ReservoirIndex)
 	if (any(or(isnan(Radiance.r), isinf(Radiance.r))))
 	{
 		Radiance = 0.0f;
+	}
+
+	float MaxRadiance = max3(Radiance.x, Radiance.y, Radiance.z);
+	if (MaxRadiance > MaxPathIntensity)
+	{
+		Radiance *= MaxPathIntensity / MaxRadiance;
 	}
 
 	// Transmittance is calculated separately
