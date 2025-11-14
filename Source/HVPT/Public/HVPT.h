@@ -37,6 +37,7 @@ namespace HVPT
 	HVPT_API bool ShouldWriteNormals();
 	HVPT_API bool ShouldAccumulate();
 	HVPT_API bool UseSurfaceContributions();
+	HVPT_API int32 GetSamplesPerPixel();
 	HVPT_API int32 GetMaxBounces();
 	HVPT_API int32 GetMaxRaymarchSteps();
 

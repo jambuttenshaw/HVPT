@@ -30,6 +30,7 @@ Texture2D<float> SceneDepthTexture_Copy;
 uint TemporalSeed;
 
 // Tracing Parameters
+uint NumSamplesPerPixel;
 uint MaxBounces;
 uint MaxRaymarchSteps;
 
@@ -46,13 +47,13 @@ struct FHVPT_PathState
 };
 
 
-FHVPT_PathState HVPT_CreatePathState(uint2 PixelIndex)
+FHVPT_PathState HVPT_CreatePathState(uint2 PixelIndex, uint SampleIndex)
 {
 	FHVPT_PathState PathState = (FHVPT_PathState)0;
 
 	// Assumes 1spp
 	uint LinearPixelIndex = PixelIndex.y * View.ViewSizeAndInvSize.x + PixelIndex.x;
-	RandomSequence_Initialize(PathState.RandSequence, LinearPixelIndex, TemporalSeed);
+	RandomSequence_Initialize(PathState.RandSequence, LinearPixelIndex + (View.ViewSizeAndInvSize.x * View.ViewSizeAndInvSize.y * SampleIndex), TemporalSeed);
 
 	// Create ray properties
 	float DeviceZ = SceneDepthTexture_Copy.Load(uint3(PixelIndex, 0)).r;
@@ -266,11 +267,12 @@ bool HVPT_PathTracingKernel(inout FHVPT_PathState PathState, int Bounce)
 
 			float3 SigmaA = Result.SigmaT - Result.SigmaSHG;
 			float3 Albedo = saturate(Result.SigmaSHG / Result.SigmaT);
+			float3 OneMinusAlbedo = 1.0f - Albedo;
 
 			// Accumulate emission
 			if (any(Result.Emission > 0.0f))
 			{
-				PathState.Radiance += PathState.PathThroughput * /*(1.0f - Albedo) * */Result.Emission;
+				PathState.Radiance += PathState.PathThroughput * OneMinusAlbedo * Result.Emission;
 			}
 
 			// Decide on scattering type
@@ -358,17 +360,25 @@ RAY_TRACING_ENTRY_RAYGEN(HVPT_RenderWithPathTracingRGS)
 {
 	// Calculate a ray from this point
 	uint2 PixelCoord = DispatchRaysIndex().xy;
-	FHVPT_PathState PathState = HVPT_CreatePathState(PixelCoord);
 
-	for (uint Bounce = 0; Bounce < MaxBounces; Bounce++)
+	float3 TotalRadiance = 0;
+
+	for (uint Sample = 0; Sample < NumSamplesPerPixel; Sample++)
 	{
-		bool KeepGoing = HVPT_PathTracingKernel(PathState, Bounce);
-		if (!KeepGoing)
+		FHVPT_PathState PathState = HVPT_CreatePathState(PixelCoord, Sample);
+
+		for (uint Bounce = 0; Bounce < MaxBounces; Bounce++)
 		{
-			break;
+			bool KeepGoing = HVPT_PathTracingKernel(PathState, Bounce);
+			if (!KeepGoing)
+			{
+				break;
+			}
 		}
+		TotalRadiance += PathState.Radiance;
 	}
+	TotalRadiance /= (float)NumSamplesPerPixel;
 
 	// Transmittance is calculated separately
-	RWRadianceTexture[PixelCoord] = PathState.Radiance * View.PreExposure;
+	RWRadianceTexture[PixelCoord] = TotalRadiance * View.PreExposure;
 }

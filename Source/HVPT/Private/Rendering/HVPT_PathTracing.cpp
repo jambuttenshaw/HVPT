@@ -62,6 +62,7 @@ public:
 		SHADER_PARAMETER(uint32, TemporalSeed)
 
 		// Tracing Parameters
+		SHADER_PARAMETER(UINT32, NumSamplesPerPixel)
 		SHADER_PARAMETER(uint32, MaxBounces)
 		SHADER_PARAMETER(uint32, MaxRaymarchSteps)
 
@@ -136,6 +137,7 @@ void HVPT::RenderWithPathTracing(
 
 	// Note: Adding 1 to max bounces to make consistent with ReSTIR pipeline
 	// ReSTIR counts bounces as scattering events - this pipeline counts bounces as number of path vertices excluding camera vertex
+	PassParameters->NumSamplesPerPixel = HVPT::GetSamplesPerPixel();
 	PassParameters->MaxBounces = HVPT::GetMaxBounces() + 1;
 	PassParameters->MaxRaymarchSteps = HVPT::GetMaxRaymarchSteps();
 

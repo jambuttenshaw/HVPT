@@ -60,6 +60,13 @@ static TAutoConsoleVariable<bool> CVarHVPTSurfaceContributions(
 	ECVF_RenderThreadSafe
 );
 
+static TAutoConsoleVariable<int32> CVarHVPTSamplesPerPixel(
+	TEXT("r.HVPT.SamplesPerPixel"),
+	1,
+	TEXT("Number of samples per pixel (not for ReSTIR pipeline)."),
+	ECVF_RenderThreadSafe
+);
+
 static TAutoConsoleVariable<int32> CVarHVPTMaxBounces(
 	TEXT("r.HVPT.MaxBounces"),
 	4,
@@ -381,6 +388,11 @@ namespace HVPT
 		return CVarHVPTSurfaceContributions.GetValueOnRenderThread();
 	}
 
+	int32 GetSamplesPerPixel()
+	{
+		return FMath::Max(CVarHVPTSamplesPerPixel.GetValueOnRenderThread(), 1);
+	}
+
 	int32 GetMaxBounces()
 	{
 		return FMath::Max(CVarHVPTMaxBounces.GetValueOnRenderThread(), 1);
@@ -491,7 +503,7 @@ namespace HVPT
 
 	int32 GetBottomLevelGridResolution()
 	{
-		return FMath::Clamp(CVarHVPTBottomLevelGridResolution.GetValueOnRenderThread(), 1, 4);
+		return FMath::Max(CVarHVPTBottomLevelGridResolution.GetValueOnRenderThread(), 1);
 	}
 
 	float GetInsideFrustumShadingRate()
