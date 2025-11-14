@@ -256,11 +256,15 @@ void FHVPTViewExtension::PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuild
 
 	if (HVPT::ShouldAccumulate())
 	{
+		const auto& PrevView = ViewInfo.PrevViewInfo;
+		bool bViewChanged = ViewInfo.ViewRect != PrevView.ViewRect || !ViewInfo.ViewMatrices.GetViewProjectionMatrix().Equals(PrevView.ViewMatrices.GetViewProjectionMatrix(), 0.1);
+
 		FRDGTextureDesc RadianceTextureDesc = ViewState->RadianceTexture->Desc;
-		if (ViewState->TemporalAccumulationTexture 
-			&& RadianceTextureDesc.Extent != ViewState->TemporalAccumulationTexture->Desc.Extent)
+		if (bViewChanged || 
+			(ViewState->TemporalAccumulationTexture && RadianceTextureDesc.Extent != ViewState->TemporalAccumulationTexture->Desc.Extent))
 		{
 			ViewState->TemporalAccumulationTexture = nullptr;
+			ViewState->AccumulatedSampleCount = 0;
 		}
 
 		if (!ViewState->TemporalAccumulationTexture)
@@ -269,6 +273,10 @@ void FHVPTViewExtension::PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuild
 			ViewState->TemporalAccumulationTexture = GraphBuilder.CreateTexture(
 				FRDGTextureDesc::Create2D(RadianceTextureDesc.Extent, PF_A32B32G32R32F, FClearValueBinding::Black, ETextureCreateFlags::ShaderResource | ETextureCreateFlags::UAV),
 				TEXT("HVPT.TemporalAccumulation"));
+		}
+
+		if (ViewState->AccumulatedSampleCount == 0)
+		{
 			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ViewState->TemporalAccumulationTexture), 0.0f);
 		}
 
@@ -281,10 +289,6 @@ void FHVPTViewExtension::PrePostProcessPass_RenderThread(FRDGBuilder& GraphBuild
 	}
 	else
 	{
-		if (ViewState->AccumulatedSampleCount > 0)
-		{
-			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(ViewState->TemporalAccumulationTexture), 0.0f);
-		}
 		ViewState->AccumulatedSampleCount = 0;
 	}
 
