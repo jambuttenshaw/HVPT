@@ -610,7 +610,7 @@ void HVPT::PrepareRaytracingShadersReSTIR(const FViewInfo& View, const FHVPTView
 	if (CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread())
 		AddShader.template operator()<FReSTIRCandidateEvaluateFRGS>(CreatePermutation<FReSTIRCandidateEvaluateFRGS>(State));
 	AddShader.template operator()<FReSTIRTemporalReuseRGS>(CreatePermutation<FReSTIRTemporalReuseRGS>(State));
-	if (CVarHVPTReSTIRMultiPassSpatialReuse.GetValueOnRenderThread())
+	if (HVPT::GetMultiPassSpatialReuseEnabled())
 	{
 		FReSTIRSpatialReuse_EvaluateRGS::FPermutationDomain Permutation = CreatePermutation<FReSTIRSpatialReuse_EvaluateRGS>(State);
 		Permutation.Set<FReSTIRSpatialReuse_EvaluateRGS::FUse16BitResultBuffer>(CVarHVPTReSTIRMultiPassSpatialReuse16BitBuffer.GetValueOnRenderThread());

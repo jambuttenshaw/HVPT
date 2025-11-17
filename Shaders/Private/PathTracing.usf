@@ -2,6 +2,8 @@
 #include "VoxelGrid/VoxelGridTypes.ush"
 
 #include "/Engine/Private/Common.ush"
+#include "/Engine/Private/ColorSpace.ush"
+
 #include "/Engine/Private/RayTracing/RayTracingCommon.ush"
 #include "/Engine/Private/PathTracing/PathTracingCommon.ush"
 #include "/Engine/Private/PathTracing/Material/PathTracingMaterialSampling.ush"
@@ -10,6 +12,8 @@
 #include "Utils/PathTracingUtils.ush"
 #include "Utils/RayTracingUtils.ush"
 #include "Utils/TrackingUtils.ush"
+
+#include "../Shared/HVPTDefinitions.h"
 
 
 #ifndef USE_SURFACE_CONTRIBUTIONS
@@ -36,6 +40,10 @@ uint MaxRaymarchSteps;
 
 RWTexture2D<float3> RWRadianceTexture;
 
+// Debug Tools
+uint DebugFlags;
+RWTexture2D<float3> RWDebugTexture;
+
 
 struct FHVPT_PathState
 {
@@ -44,6 +52,14 @@ struct FHVPT_PathState
 
 	float3 PathThroughput;
 	float3 Radiance;
+
+#if DEBUG_OUTPUT_ENABLED
+	// Debug state
+	uint Debug_NumBounces;
+	bool Debug_bEmissionPath;
+	bool Debug_bSurfacePath;
+	uint Debug_LightId;
+#endif
 };
 
 
@@ -164,10 +180,10 @@ float3 HVPT_TraceVisibilityRay(FRayDesc RayDesc, inout RandomSequence RandSequen
 	return Throughput;
 }
 
-float3 HVPT_DirectLight_Medium(float PhaseG, float3 TranslatedWorldPos, float3 RayDirection, inout RandomSequence RandSequence)
+float3 HVPT_DirectLight_Medium(float PhaseG, float3 TranslatedWorldPos, float3 RayDirection, out uint LightId, inout RandomSequence RandSequence)
 {
 	// Select a light source to sample
-	uint LightId = -1;
+	LightId = -1;
 	FLightSample LightSample = HVPT_SampleLight(TranslatedWorldPos, 0.0f, RandomSequence_GenerateSample3D(RandSequence), LightId);
 	if (LightSample.Pdf <= 0)
 	{
@@ -194,10 +210,10 @@ float3 HVPT_DirectLight_Medium(float PhaseG, float3 TranslatedWorldPos, float3 R
 	return MaterialPDF * LightSample.RadianceOverPdf * Visibility;
 }
 
-float3 HVPT_DirectLight_Surface(FPathTracingPayload SurfacePayload, float3 RayDirection, inout RandomSequence RandSequence)
+float3 HVPT_DirectLight_Surface(FPathTracingPayload SurfacePayload, float3 RayDirection, out uint LightId, inout RandomSequence RandSequence)
 {
 	// Select a light source to sample
-	uint LightId = -1;
+	LightId = -1;
 	FLightSample LightSample = HVPT_SampleLight(SurfacePayload.TranslatedWorldPos, SurfacePayload.WorldNormal, RandomSequence_GenerateSample3D(RandSequence), LightId);
 	if (LightSample.Pdf <= 0)
 	{
@@ -273,6 +289,9 @@ bool HVPT_PathTracingKernel(inout FHVPT_PathState PathState, int Bounce)
 			if (any(Result.Emission > 0.0f))
 			{
 				PathState.Radiance += PathState.PathThroughput * OneMinusAlbedo * Result.Emission;
+#if DEBUG_OUTPUT_ENABLED
+				PathState.Debug_bEmissionPath = true;
+#endif
 			}
 
 			// Decide on scattering type
@@ -298,7 +317,11 @@ bool HVPT_PathTracingKernel(inout FHVPT_PathState PathState, int Bounce)
 				PathState.PathThroughput *= Albedo;
 
 				// Sample direct lighting at this vertex
-				PathState.Radiance += PathState.PathThroughput * HVPT_DirectLight_Medium(Result.PhaseG, WorldPosition, PathState.Ray.Direction, PathState.RandSequence);
+				uint LightId;
+				PathState.Radiance += PathState.PathThroughput * HVPT_DirectLight_Medium(Result.PhaseG, WorldPosition, PathState.Ray.Direction, LightId, PathState.RandSequence);
+#if DEBUG_OUTPUT_ENABLED
+				PathState.Debug_LightId = LightId;
+#endif
 
 				// Sample phase function for new scattering direction
 				float4 DirectionAndPDF = ImportanceSampleHenyeyGreensteinPhase(RandomSequence_GenerateSample2D(PathState.RandSequence), Result.PhaseG);
@@ -342,12 +365,23 @@ bool HVPT_PathTracingKernel(inout FHVPT_PathState PathState, int Bounce)
 		if (any(SurfacePayload.Radiance > 0.0f))
 		{
 			PathState.Radiance += PathState.PathThroughput * SurfacePayload.Radiance;
+#if DEBUG_OUTPUT_ENABLED
+			PathState.Debug_bEmissionPath = true;
+#endif
 		}
 		else
 		{
-			PathState.Radiance += PathState.PathThroughput * HVPT_DirectLight_Surface(SurfacePayload, PathState.Ray.Direction, PathState.RandSequence);
+			uint LightId;
+			PathState.Radiance += PathState.PathThroughput * HVPT_DirectLight_Surface(SurfacePayload, PathState.Ray.Direction, LightId, PathState.RandSequence);
+#if DEBUG_OUTPUT_ENABLED
+			PathState.Debug_LightId = LightId;
+#endif
 		}
+#if DEBUG_OUTPUT_ENABLED
+		PathState.Debug_bSurfacePath = true;
+#endif
 	}
+
 	// TODO: Do I want to be sampling any light when rays escape the volume and do not hit a surface (go off into infinity?)
 #endif // USE_SURFACE_CONTRIBUTIONS
 
@@ -356,6 +390,11 @@ bool HVPT_PathTracingKernel(inout FHVPT_PathState PathState, int Bounce)
 }
 
 
+float3 NormalizedFloatAsHueToRGB(float H)
+{
+	return HSV_2_LinearRGB(float3(H, 1, 1));
+}
+
 RAY_TRACING_ENTRY_RAYGEN(HVPT_RenderWithPathTracingRGS)
 {
 	// Calculate a ray from this point
@@ -363,11 +402,13 @@ RAY_TRACING_ENTRY_RAYGEN(HVPT_RenderWithPathTracingRGS)
 
 	float3 TotalRadiance = 0;
 
+	FHVPT_PathState PathState = (FHVPT_PathState)0;
 	for (uint Sample = 0; Sample < NumSamplesPerPixel; Sample++)
 	{
-		FHVPT_PathState PathState = HVPT_CreatePathState(PixelCoord, Sample);
+		PathState = HVPT_CreatePathState(PixelCoord, Sample);
 
-		for (uint Bounce = 0; Bounce < MaxBounces; Bounce++)
+		uint Bounce = 0;
+		for (; Bounce < MaxBounces; Bounce++)
 		{
 			bool KeepGoing = HVPT_PathTracingKernel(PathState, Bounce);
 			if (!KeepGoing)
@@ -376,9 +417,53 @@ RAY_TRACING_ENTRY_RAYGEN(HVPT_RenderWithPathTracingRGS)
 			}
 		}
 		TotalRadiance += PathState.Radiance;
+
+#if DEBUG_OUTPUT_ENABLED
+		PathState.Debug_NumBounces = Bounce;
+#endif
 	}
 	TotalRadiance /= (float)NumSamplesPerPixel;
 
 	// Transmittance is calculated separately
 	RWRadianceTexture[PixelCoord] = TotalRadiance * View.PreExposure;
+
+#if DEBUG_OUTPUT_ENABLED
+	if (any(PathState.Radiance > 0))
+	{
+		float3 Debug = (float3) 0;
+
+		uint DebugViewMode = DebugFlags & 0xFF;
+		switch (DebugViewMode)
+		{
+		case HVPT_DEBUG_VIEW_MODE_NUM_BOUNCES:
+			Debug = NormalizedFloatAsHueToRGB(1.0f - (PathState.Debug_NumBounces - 1) / (float)(MaxBounces - 1));
+			break;
+		case HVPT_DEBUG_VIEW_MODE_PATH_TYPE:
+		{
+			if (PathState.Debug_bSurfacePath)
+			{
+				Debug = float3(0, 0, 1);
+				break;
+			}
+
+			if (PathState.Debug_bEmissionPath)
+			{
+				Debug = float3(1, 0, 0);
+				break;
+			}
+
+			// Scattering path
+			Debug = float3(0, 1, 0);
+			break;
+		}
+		case HVPT_DEBUG_VIEW_MODE_LIGHT_ID:
+			Debug = PathState.Debug_bEmissionPath ? 0.2f : NormalizedFloatAsHueToRGB(PathState.Debug_LightId / (float)SceneLightCount);
+			break;
+		default:
+			// Others are only relevant to ReSTIR pipeline
+			break;
+		}
+		RWDebugTexture[PixelCoord] = Debug;
+	}
+#endif
 }

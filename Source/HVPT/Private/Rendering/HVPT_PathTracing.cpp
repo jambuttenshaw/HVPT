@@ -21,6 +21,8 @@
 #include "Helpers.h"
 #include "PathTracingLightGrid.h"
 
+#include "HVPTDefinitions.h"
+
 
 #if RHI_RAYTRACING
 
@@ -32,7 +34,8 @@ public:
 
 	class FSurfaceContributions : SHADER_PERMUTATION_BOOL("USE_SURFACE_CONTRIBUTIONS");
 	class FApplyVolumetricFog : SHADER_PERMUTATION_BOOL("APPLY_VOLUMETRIC_FOG");
-	using FPermutationDomain = TShaderPermutationDomain<FSurfaceContributions, FApplyVolumetricFog>;
+	class FDebugOutputEnabled : SHADER_PERMUTATION_BOOL("DEBUG_OUTPUT_ENABLED");
+	using FPermutationDomain = TShaderPermutationDomain<FSurfaceContributions, FApplyVolumetricFog, FDebugOutputEnabled>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		// Scene data
@@ -70,6 +73,10 @@ public:
 
 		// Output
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float3>, RWRadianceTexture)
+
+		// Debug
+		SHADER_PARAMETER(uint32, DebugFlags)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float3>, RWDebugTexture)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -99,6 +106,7 @@ void HVPT::PrepareRaytracingShaders(const FViewInfo& View, const FHVPTViewState&
 	FHVPT_RenderWithPathTracingRGS::FPermutationDomain PermutationVector;
 	PermutationVector.Set<FHVPT_RenderWithPathTracingRGS::FSurfaceContributions>(HVPT::UseSurfaceContributions());
 	PermutationVector.Set<FHVPT_RenderWithPathTracingRGS::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == EFogCompositionMode::PostAndPathTracing);
+	PermutationVector.Set<FHVPT_RenderWithPathTracingRGS::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 	auto RayGenShader = ShaderMap->GetShader<FHVPT_RenderWithPathTracingRGS>(PermutationVector);
 	OutRayGenShaders.Add(RayGenShader.GetRayTracingShader());
 }
@@ -143,11 +151,18 @@ void HVPT::RenderWithPathTracing(
 
 	PassParameters->RWRadianceTexture = GraphBuilder.CreateUAV(State.RadianceTexture);
 
+	if (State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE)
+	{
+		PassParameters->DebugFlags = State.DebugFlags;
+		PassParameters->RWDebugTexture = GraphBuilder.CreateUAV(State.DebugTexture);
+	}
+
 	FIntPoint DispatchSize = ViewInfo.ViewRect.Size();
 
 	FHVPT_RenderWithPathTracingRGS::FPermutationDomain PermutationVector;
 	PermutationVector.Set<FHVPT_RenderWithPathTracingRGS::FSurfaceContributions>(HVPT::UseSurfaceContributions());
 	PermutationVector.Set<FHVPT_RenderWithPathTracingRGS::FApplyVolumetricFog>(HVPT::GetFogCompositingMode() == EFogCompositionMode::PostAndPathTracing);
+	PermutationVector.Set<FHVPT_RenderWithPathTracingRGS::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 	TShaderMapRef<FHVPT_RenderWithPathTracingRGS> RayGenShader(ViewInfo.ShaderMap, PermutationVector);
 
 	GraphBuilder.AddPass(
