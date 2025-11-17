@@ -7,8 +7,8 @@
 #include "HVPT.h"
 #include "HVPTViewState.h"
 
-static TAutoConsoleVariable<int32> CVarHVPTAccumulatePauseAfter(
-	TEXT("r.HVPT.Accumulate.PauseAfter"),
+static TAutoConsoleVariable<int32> CVarHVPTAccumulateStopAfter(
+	TEXT("r.HVPT.Accumulate.StopAfter"),
 	-1,
 	TEXT("The number of samples to stop accumulating after."),
 	ECVF_RenderThreadSafe
@@ -61,14 +61,14 @@ void HVPT::Accumulate(
 	FRDGBuilder& GraphBuilder, const FViewInfo& ViewInfo, FHVPTViewState& State
 )
 {
-	int32 PauseAfter = CVarHVPTAccumulatePauseAfter.GetValueOnRenderThread();
-	bool bPause = PauseAfter > 0 && State.AccumulatedSampleCount > static_cast<uint32>(PauseAfter);
+	int32 StopAfter = CVarHVPTAccumulateStopAfter.GetValueOnRenderThread();
+	bool bPause = StopAfter > 0 && State.AccumulatedSampleCount > static_cast<uint32>(StopAfter);
 
 	FHVPT_AccumulateCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FHVPT_AccumulateCS::FParameters>();
 
 	PassParameters->View = ViewInfo.ViewUniformBuffer;
 
-	PassParameters->NumAccumulatedSamples = bPause ? PauseAfter : State.AccumulatedSampleCount;
+	PassParameters->NumAccumulatedSamples = bPause ? StopAfter : State.AccumulatedSampleCount;
 
 	PassParameters->RWTemporalAccumulationTexture_Hi = GraphBuilder.CreateUAV(State.TemporalAccumulationTexture_Hi);
 	PassParameters->RWTemporalAccumulationTexture_Lo = GraphBuilder.CreateUAV(State.TemporalAccumulationTexture_Lo);
