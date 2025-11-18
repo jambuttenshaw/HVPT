@@ -48,7 +48,22 @@ uint SurfaceBounceAllocatorSize;
 RWStructuredBuffer<uint> RWDeferredSurfaceBounceAllocator;
 RWStructuredBuffer<FHVPT_DeferredSurfaceBounce> RWDeferredSurfaceBounces;
 RWStructuredBuffer<FHVPT_Bounce> RWDeferredSurfaceExtraBounces;
+RWBuffer<uint> RWDeferredSurfaceBouncesIndirection;
 
+uint PackDeferredSurfaceBounceIndirection(uint Index, uint PackedDirection)
+{
+	// Uses packed direction as sorting key
+	// This is placed in top 12 bits (6 bits for X and 6 for Y)
+	// Index is placed in bottom 20 bits
+	return (Index & 0x000FFFFF)
+		 | ((PackedDirection & 0xFC000000) << 20U)
+		 | ((PackedDirection & 0x0000FC00) << 26U);
+}
+
+uint UnpackedDeferredSurfaceBounceIndirection(uint Packed)
+{
+	return Packed & 0x000FFFFF;
+}
 
 #if USE_SURFACE_CONTRIBUTIONS
 float3 SampleDirectLightingSurface(
@@ -311,6 +326,10 @@ FHVPT_Reservoir ComputeInitialSample(
 				{
 					RWDeferredSurfaceExtraBounces[OutExtraBounceIndex + i] = ExtraBounces[i];
 				}
+
+#if SURFACE_BOUNCE_USE_INDIRECTION
+				RWDeferredSurfaceBouncesIndirection[OutSurfaceBounceIndex] = PackDeferredSurfaceBounceIndirection(AllocatedIndex, SurfaceBounce.PackedDirection);
+#endif
 			}
 			else // If failed to allocate space then just trace the ray straight away
 #endif
@@ -500,11 +519,16 @@ RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateGenerationRGS)
 
 StructuredBuffer<FHVPT_DeferredSurfaceBounce> DeferredSurfaceBounces;
 StructuredBuffer<FHVPT_Bounce> DeferredSurfaceExtraBounces;
+Buffer<uint> DeferredSurfaceBouncesIndirection;
 
 // Deferred surface bounces always use indirect dispatch
 RAY_TRACING_ENTRY_RAYGEN(ReSTIRCandidateEvaluateSurfaceBouncesRGS)
 {
+#if SURFACE_BOUNCE_USE_INDIRECTION
+	uint SurfaceBounceIndex = UnpackedDeferredSurfaceBounceIndirection(DeferredSurfaceBouncesIndirection[DispatchRaysIndex().x]);
+#else
 	uint SurfaceBounceIndex = DispatchRaysIndex().x;
+#endif
 	FHVPT_DeferredSurfaceBounce SurfaceBounce = DeferredSurfaceBounces[SurfaceBounceIndex];
 
 	FRayDesc SurfaceRay = HVPT_CreateRayDesc<false>(SurfaceBounce.Origin, HVPT_SurfaceBounce_GetPackedDirection(SurfaceBounce), 0.0f, POSITIVE_INFINITY);

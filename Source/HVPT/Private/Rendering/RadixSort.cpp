@@ -139,14 +139,20 @@ public:
 	DECLARE_GLOBAL_SHADER(FHVPT_RadixSortDownsweepCS);
 	SHADER_USE_PARAMETER_STRUCT(FHVPT_RadixSortDownsweepCS, FGlobalShader);
 
+	class FRadixSortValues : SHADER_PERMUTATION_BOOL("RADIX_SORT_VALUES");
+	using FPermutationDomain = TShaderPermutationDomain<FRadixSortValues>;
+
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(uint32, RadixShift)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FRadixSortParameters>, RadixSortParameterBuffer)
 
 		SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, InKeys)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, OutKeys)
+
 		SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, InOffsets)
 
-		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, OutKeys)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, InValues)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, OutValues)
 
 		RDG_BUFFER_ACCESS(IndirectArgs, ERHIAccess::IndirectArgs)
 	END_SHADER_PARAMETER_STRUCT()
@@ -165,23 +171,88 @@ IMPLEMENT_GLOBAL_SHADER(FHVPT_RadixSortDownsweepCS, "/Plugin/HVPT/Private/Utils/
 
 uint32 HVPT::Private::SortBufferIndirect(
 	FRDGBuilder& GraphBuilder, 
-	TArrayView<FRDGBufferRef> InBuffers, 
+	TArrayView<FRDGBufferRef> InKeyBuffers,
+	/* Optional */ TArrayView<FRDGBufferRef> InValueBuffers,
 	int32 BufferIndex, 
 	FRDGBufferRef Counter, 
 	uint32 CounterOffset, 
 	uint32 KeyMask, 
 	ERHIFeatureLevel::Type FeatureLevel)
 {
-	check(InBuffers.Num() >= 2); // Only element 0 and 1 will ever be used, but it's not invalid to have a larger array
-	check(InBuffers[0] && InBuffers[1]);
+	check(InKeyBuffers.Num() >= 2); // Only element 0 and 1 will ever be used, but it's not invalid to have a larger array
+	check(InKeyBuffers[0] && InKeyBuffers[1]);
 	check(BufferIndex >= 0 && BufferIndex < 2);
+
+	bool bSortValues = !InValueBuffers.IsEmpty();
+	if (bSortValues)
+	{
+		check(InValueBuffers.Num() >= 2);
+		check(InValueBuffers[0] && InValueBuffers[1]);
+	}
+
+	TStaticArray<FRDGBufferSRVRef, 2> KeysSRV	= { GraphBuilder.CreateSRV(InKeyBuffers[0], PF_R32_UINT), GraphBuilder.CreateSRV(InKeyBuffers[1], PF_R32_UINT) };
+	TStaticArray<FRDGBufferUAVRef, 2> KeysUAV	= { GraphBuilder.CreateUAV(InKeyBuffers[0], PF_R32_UINT), GraphBuilder.CreateUAV(InKeyBuffers[1], PF_R32_UINT) };
+	TStaticArray<FRDGBufferSRVRef, 2> ValuesSRV{};
+	TStaticArray<FRDGBufferUAVRef, 2> ValuesUAV{};
+	if (bSortValues)
+	{
+		ValuesSRV = { GraphBuilder.CreateSRV(InValueBuffers[0], PF_R32_UINT), GraphBuilder.CreateSRV(InValueBuffers[1], PF_R32_UINT) };
+		ValuesUAV = { GraphBuilder.CreateUAV(InValueBuffers[0], PF_R32_UINT), GraphBuilder.CreateUAV(InValueBuffers[1], PF_R32_UINT) };
+	}
+
+	return SortBufferIndirect(
+		GraphBuilder,
+		KeysSRV,
+		KeysUAV,
+		bSortValues ? ValuesSRV : TArrayView<FRDGBufferSRVRef>{},
+		bSortValues ? ValuesUAV : TArrayView<FRDGBufferUAVRef>{},
+		BufferIndex,
+		Counter,
+		CounterOffset,
+		KeyMask,
+		FeatureLevel
+	);
+}
+
+uint32 HVPT::Private::SortBufferIndirect(
+	FRDGBuilder& GraphBuilder, 
+	TArrayView<FRDGBufferSRVRef> InKeySRVs, 
+	TArrayView<FRDGBufferUAVRef> InKeyUAVs, 
+	/* Optional */ TArrayView<FRDGBufferSRVRef> InValueSRVs, 
+	/* Optional */ TArrayView<FRDGBufferUAVRef> InValueUAVs, 
+	int32 BufferIndex, 
+	FRDGBufferRef Counter, 
+	uint32 CounterOffset, 
+	uint32 KeyMask, 
+	ERHIFeatureLevel::Type FeatureLevel
+)
+{
+	check(BufferIndex >= 0 && BufferIndex < 2);
+
+	// Only element 0 and 1 will ever be used, but it's not invalid to have a larger array
+	check(InKeySRVs.Num() >= 2); 
+	check(InKeySRVs[0] && InKeySRVs[1]);
+	check(InKeyUAVs.Num() >= 2);
+	check(InKeyUAVs[0] && InKeyUAVs[1]);
+
+	bool bSortValues = !InValueSRVs.IsEmpty();
+	if (bSortValues)
+	{
+		check(InValueSRVs.Num() >= 2);
+		check(InValueSRVs[0] && InValueSRVs[1]);
+		check(InValueUAVs.Num() >= 2);
+		check(InValueUAVs[0] && InValueUAVs[1]);
+	}
 
 	auto ShaderMap = GetGlobalShaderMap(FeatureLevel);
 	TShaderMapRef<FHVPT_RadixSortPopulateParametersCS> PopulateParametersCS(ShaderMap);
 	TShaderMapRef<FHVPT_RadixSortClearOffsetsCS> ClearOffsetsCS(ShaderMap);
 	TShaderMapRef<FHVPT_RadixSortUpsweepCS> UpsweepCS(ShaderMap);
 	TShaderMapRef<FHVPT_RadixSortSpineCS> SpineCS(ShaderMap);
-	TShaderMapRef<FHVPT_RadixSortDownsweepCS> DownsweepCS(ShaderMap);
+
+	FHVPT_RadixSortDownsweepCS::FPermutationDomain DownsweepPermutation;
+	DownsweepPermutation.Set<FHVPT_RadixSortDownsweepCS::FRadixSortValues>(bSortValues);
+	TShaderMapRef<FHVPT_RadixSortDownsweepCS> DownsweepCS(ShaderMap, DownsweepPermutation);
 
 	// Create parameter and indirect args buffers
 	FRDGBufferRef ParameterBuffer = GraphBuilder.CreateBuffer(
@@ -246,7 +317,7 @@ uint32 HVPT::Private::SortBufferIndirect(
 				PassParameters->RadixShift = RadixShift;
 				PassParameters->RadixSortParameterBuffer = GraphBuilder.CreateSRV(ParameterBuffer);
 
-				PassParameters->InKeys = GraphBuilder.CreateSRV(InBuffers[BufferIndex], PF_R32_UINT);
+				PassParameters->InKeys = InKeySRVs[BufferIndex];
 				PassParameters->OutOffsets = GraphBuilder.CreateUAV(OffsetBuffers[0], PF_R32_UINT);
 
 				PassParameters->IndirectArgs = IndirectArgs;
@@ -289,9 +360,16 @@ uint32 HVPT::Private::SortBufferIndirect(
 				PassParameters->RadixShift = RadixShift;
 				PassParameters->RadixSortParameterBuffer = GraphBuilder.CreateSRV(ParameterBuffer);
 
-				PassParameters->InKeys = GraphBuilder.CreateSRV(InBuffers[BufferIndex], PF_R32_UINT);
+				PassParameters->InKeys = InKeySRVs[BufferIndex];
+				PassParameters->OutKeys = InKeyUAVs[BufferIndex ^ 0x1];
+
 				PassParameters->InOffsets = GraphBuilder.CreateSRV(OffsetBuffers[1], PF_R32_UINT);
-				PassParameters->OutKeys = GraphBuilder.CreateUAV(InBuffers[BufferIndex ^ 0x1], PF_R32_UINT);
+
+				if (bSortValues)
+				{
+					PassParameters->InValues = InValueSRVs[BufferIndex];
+					PassParameters->OutValues = InValueUAVs[BufferIndex ^ 0x1];
+				}
 
 				PassParameters->IndirectArgs = IndirectArgs;
 

@@ -48,6 +48,13 @@ static TAutoConsoleVariable<int32> CVarHVPTReSTIRDeferredBounceBufferSize(
 	ECVF_RenderThreadSafe
 );
 
+static TAutoConsoleVariable<bool> CVarHVPTReSTIRDeferSurfaceBouncesSorting(
+	TEXT("r.HVPT.ReSTIR.DeferSurfaceBounces.Sorting"),
+	false,
+	TEXT("Sorts the deferred surface bounce buffer prior to tracing to improve coherence."),
+	ECVF_RenderThreadSafe
+);
+
 static TAutoConsoleVariable<int32> CVarHVPTReSTIRMultiPassSpatialReuseTileSize(
 	TEXT("r.HVPT.ReSTIR.SpatialReuse.MultiPass.TileSize"),
 	512,
@@ -218,13 +225,15 @@ public:
 
 	class FDeferEvaluateF : SHADER_PERMUTATION_BOOL("DEFER_EVALUATE_F");
 	class FDeferSurfaceHits : SHADER_PERMUTATION_BOOL("DEFER_SURFACE_HITS");
+	class FDeferSurfaceBouncesUseIndirection : SHADER_PERMUTATION_BOOL("SURFACE_BOUNCE_USE_INDIRECTION");
 	using FPermutationDomain = TShaderPermutationDomain<FReSTIRBaseRGS::FMultipleBounces,
 														FReSTIRBaseRGS::FUseSurfaceContributions,
 														FReSTIRBaseRGS::FUseSER,
 														FReSTIRBaseRGS::FUseDispatchIndirect,
 														FReSTIRBaseRGS::FDebugOutputEnabled,
 														FDeferEvaluateF,
-														FDeferSurfaceHits>;
+														FDeferSurfaceHits,
+														FDeferSurfaceBouncesUseIndirection>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER_STRUCT_INCLUDE(FReSTIRCommonParameters, Common)
@@ -244,6 +253,7 @@ public:
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<uint>, RWDeferredSurfaceBounceAllocator)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_DeferredSurfaceBounce>, RWDeferredSurfaceBounces)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Bounce>, RWDeferredSurfaceExtraBounces)
+		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, RWDeferredSurfaceBouncesIndirection)
 	END_SHADER_PARAMETER_STRUCT()
 };
 
@@ -255,7 +265,10 @@ public:
 	DECLARE_GLOBAL_SHADER(FReSTIRCandidateEvaluateSurfaceBouncesRGS);
 	SHADER_USE_ROOT_PARAMETER_STRUCT(FReSTIRCandidateEvaluateSurfaceBouncesRGS, FReSTIRBaseRGS);
 
-	using FPermutationDomain = TShaderPermutationDomain<FReSTIRBaseRGS::FUseSER,
+	// Indirection is used to enable sorting, to improve coherence of raytracing work
+	class FDeferSurfaceBouncesUseIndirection : SHADER_PERMUTATION_BOOL("SURFACE_BOUNCE_USE_INDIRECTION");
+	using FPermutationDomain = TShaderPermutationDomain<FDeferSurfaceBouncesUseIndirection,
+														FReSTIRBaseRGS::FUseSER,
 														FReSTIRBaseRGS::FDebugOutputEnabled>;
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
@@ -265,6 +278,7 @@ public:
 
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_DeferredSurfaceBounce>, DeferredSurfaceBounces)
 		SHADER_PARAMETER_RDG_BUFFER_SRV(StructuredBuffer<FHVPT_Bounce>, DeferredSurfaceExtraBounces)
+		SHADER_PARAMETER_RDG_BUFFER_SRV(Buffer<uint>, DeferredSurfaceBouncesIndirection)
 
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Reservoir>, RWCurrentReservoirs)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<FHVPT_Bounce>, RWExtraBounces)
@@ -598,11 +612,13 @@ void HVPT::PrepareRaytracingShadersReSTIR(const FViewInfo& View, const FHVPTView
 		FReSTIRCandidateGenerationRGS::FPermutationDomain Permutation = CreatePermutation<FReSTIRCandidateGenerationRGS>(State);
 		Permutation.Set<FReSTIRCandidateGenerationRGS::FDeferEvaluateF>(CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread());
 		Permutation.Set<FReSTIRCandidateGenerationRGS::FDeferSurfaceHits>(DeferSurfaceHits());
+		Permutation.Set<FReSTIRCandidateGenerationRGS::FDeferSurfaceBouncesUseIndirection>(DeferSurfaceHits() && CVarHVPTReSTIRDeferSurfaceBouncesSorting.GetValueOnRenderThread());
 		AddShader.template operator()<FReSTIRCandidateGenerationRGS>(Permutation);
 	}
 	if (DeferSurfaceHits())
 	{
 		FReSTIRCandidateEvaluateSurfaceBouncesRGS::FPermutationDomain Permutation;
+		Permutation.Set<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FDeferSurfaceBouncesUseIndirection>(CVarHVPTReSTIRDeferSurfaceBouncesSorting.GetValueOnRenderThread());
 		Permutation.Set<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FUseSER>(HVPT::ShouldUseSER());
 		Permutation.Set<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FDebugOutputEnabled>(State.DebugFlags & HVPT_DEBUG_FLAG_ENABLE);
 		OutRayGenShaders.Add(ShaderMap->GetShader<FReSTIRCandidateEvaluateSurfaceBouncesRGS>(Permutation).GetRayTracingShader());
@@ -849,10 +865,18 @@ void HVPT::RenderWithReSTIRPathTracing(
 
 		// For indirect surface bounces
 		bool bDeferSurfaceHits = DeferSurfaceHits();
+		bool bSortSurfaceHits = CVarHVPTReSTIRDeferSurfaceBouncesSorting.GetValueOnRenderThread();
 		// Buffer allocation is split evenly among candidates
 		// Each candidate allocates into a different region of the buffer
 		// This is to allow deferred candidates to be evaluated over multiple passes to prevent race conditions on the reservoir buffer
 		uint32 MaxDeferredSurfaceBounces = CVarHVPTReSTIRDeferredBounceBufferSize.GetValueOnRenderThread();
+		if (bSortSurfaceHits)
+		{
+			// When sorting, the direction is used as a key for the sort. To allow a reasonable amount of precision to represent
+			// the direction, 6 bits per component are allowed. This leaves 20 bits for an indirection index - which gives a
+			// maximum number of addressable surface bounces per candidate as 2^20 (~1,000,000).
+			MaxDeferredSurfaceBounces = FMath::Min(MaxDeferredSurfaceBounces, NumCandidates * (1U << 20U));
+		}
 		uint32 MaxDeferredSurfaceBouncesPerCandidate = MaxDeferredSurfaceBounces / NumCandidates;
 
 		if (bDeferSurfaceHits && !CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread())
@@ -863,6 +887,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 		FRDGBufferRef DeferredSurfaceBounceAllocator = nullptr;
 		FRDGBufferRef DeferredSurfaceBounces = nullptr;
 		FRDGBufferRef DeferredSurfaceExtraBounces = nullptr;
+		FRDGBufferRef DeferredSurfaceBouncesIndirection = nullptr;
 		if (bDeferSurfaceHits)
 		{
 			DeferredSurfaceBounceAllocator = GraphBuilder.CreateBuffer(
@@ -871,6 +896,11 @@ void HVPT::RenderWithReSTIRPathTracing(
 				FRDGBufferDesc::CreateStructuredDesc(sizeof(FHVPT_DeferredSurfaceBounce), MaxDeferredSurfaceBounces), TEXT("HVPT.ReSTIR.DeferredSurfaceBounces"));
 			DeferredSurfaceExtraBounces = GraphBuilder.CreateBuffer(
 				FRDGBufferDesc::CreateStructuredDesc(sizeof(FHVPT_Bounce), MaxDeferredSurfaceBounces * HVPT::GetMaxBounces()), TEXT("HVPT.ReSTIR.DeferredSurfaceExtraBounces"));
+			if (bSortSurfaceHits)
+			{
+				DeferredSurfaceBouncesIndirection = GraphBuilder.CreateBuffer(
+					FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), MaxDeferredSurfaceBounces), TEXT("HVPT.ReSTIR.DeferredSurfaceBouncesIndirection"));
+			}
 
 			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(DeferredSurfaceBounceAllocator), 0);
 		}
@@ -895,11 +925,17 @@ void HVPT::RenderWithReSTIRPathTracing(
 				PassParameters->RWDeferredSurfaceBounceAllocator = GraphBuilder.CreateUAV(DeferredSurfaceBounceAllocator);
 				PassParameters->RWDeferredSurfaceBounces = GraphBuilder.CreateUAV(DeferredSurfaceBounces);
 				PassParameters->RWDeferredSurfaceExtraBounces = GraphBuilder.CreateUAV(DeferredSurfaceExtraBounces);
+
+				if (bSortSurfaceHits)
+				{
+					PassParameters->RWDeferredSurfaceBouncesIndirection = GraphBuilder.CreateUAV(DeferredSurfaceBouncesIndirection, PF_R32_UINT);
+				}
 			}
 
 			FReSTIRCandidateGenerationRGS::FPermutationDomain Permutation = CreatePermutation<FReSTIRCandidateGenerationRGS>(State);
 			Permutation.Set<FReSTIRCandidateGenerationRGS::FDeferEvaluateF>(CVarHVPTReSTIRDeferEvaluateCandidateF.GetValueOnRenderThread());
 			Permutation.Set<FReSTIRCandidateGenerationRGS::FDeferSurfaceHits>(DeferSurfaceHits());
+			Permutation.Set<FReSTIRCandidateGenerationRGS::FDeferSurfaceBouncesUseIndirection>(DeferSurfaceHits() && CVarHVPTReSTIRDeferSurfaceBouncesSorting.GetValueOnRenderThread());
 			AddRaytracingPass<FReSTIRCandidateGenerationRGS>(
 				GraphBuilder,
 				RDG_EVENT_NAME("ReSTIRCandidateGeneration"),
@@ -912,11 +948,65 @@ void HVPT::RenderWithReSTIRPathTracing(
 		}
 		if (bDeferSurfaceHits)
 		{
+			FRDGBufferRef IndirectionPing = nullptr;
+			FRDGBufferRef IndirectionPong = nullptr;
+			if (bSortSurfaceHits)
+			{
+				const auto Desc = FRDGBufferDesc::CreateBufferDesc(sizeof(uint32), MaxDeferredSurfaceBouncesPerCandidate);
+				IndirectionPing = GraphBuilder.CreateBuffer(Desc, TEXT("HVPT.ReSTIR.DeferredSurfaceBouncesIndirectionPing"));
+				IndirectionPong = GraphBuilder.CreateBuffer(Desc, TEXT("HVPT.ReSTIR.DeferredSurfaceBouncesIndirectionPong"));
+			}
+
 			// Multiple candidates for the same pixel may want to defer surface bounce evaluation.
 			// Evaluating the surface bounce requires both reading and writing to the reservoir buffer.
 			// Multiple passes are required to prevent race conditions on the reservoir buffer.
 			for (uint32 DeferredSurfaceBouncePass = 0; DeferredSurfaceBouncePass < NumCandidates; DeferredSurfaceBouncePass++)
 			{
+				FRDGBufferSRVRef IndirectionSRV = nullptr;
+
+				// Optionally sort buffer to improve coherence in ray tracing
+				if (bSortSurfaceHits)
+				{
+					RDG_EVENT_SCOPE(GraphBuilder, "Sort Surface Bounces");
+
+					// The copy is required because we are not able to specify a sub-region of a buffer when creating a UAV (RDG only supports this for SRVs)
+					// It is important that we sort a sub-region of the buffer at a time - so we copy the region of the buffer that we are interested in
+					// and then sort that.
+					const uint64 BytesPerCandidate = MaxDeferredSurfaceBouncesPerCandidate * sizeof(uint32);
+					AddCopyBufferPass(
+						GraphBuilder,
+						IndirectionPing,
+						0,
+						DeferredSurfaceBouncesIndirection,
+						DeferredSurfaceBouncePass * BytesPerCandidate,
+						BytesPerCandidate
+					);
+
+					// Sort deferred surface bounce buffer
+					TStaticArray<FRDGBufferSRVRef, 2> KeySRVs = {
+						GraphBuilder.CreateSRV(IndirectionPing, PF_R32_UINT),
+						GraphBuilder.CreateSRV(IndirectionPong, PF_R32_UINT)
+					};
+					TStaticArray<FRDGBufferUAVRef, 2> KeyUAVs = {
+						GraphBuilder.CreateUAV(IndirectionPing, PF_R32_UINT),
+						GraphBuilder.CreateUAV(IndirectionPong, PF_R32_UINT)
+					};
+					int32 BufferIndex = HVPT::Private::SortBufferIndirect(
+						GraphBuilder,
+						KeySRVs,
+						KeyUAVs,
+						{},
+						{},
+						0,
+						DeferredSurfaceBounceAllocator,
+						DeferredSurfaceBouncePass,
+						0xFFF00000,
+						ViewInfo.FeatureLevel
+					);
+
+					IndirectionSRV = KeySRVs[BufferIndex];
+				} 
+
 				// Setup indirect arguments
 				FRDGBufferRef DispatchDeferredSurfaceBounceIndirectArguments = FComputeShaderUtils::AddIndirectArgsSetupCsPass1D(
 					GraphBuilder, ViewInfo.FeatureLevel, DeferredSurfaceBounceAllocator, TEXT("HVPT.ReSTIR.DeferredSurfaceBouncesIndirectArguments"), 1, DeferredSurfaceBouncePass);
@@ -935,11 +1025,16 @@ void HVPT::RenderWithReSTIRPathTracing(
 					FRDGBufferSRVDesc{ DeferredSurfaceExtraBounces,
 					DeferredSurfaceBouncePass * MaxDeferredSurfaceBouncesPerCandidate * static_cast<uint32>(sizeof(FHVPT_Bounce)) * HVPT::GetMaxBounces(),
 					MaxDeferredSurfaceBouncesPerCandidate * HVPT::GetMaxBounces() });
+				if (bSortSurfaceHits)
+				{
+					PassParameters->DeferredSurfaceBouncesIndirection = IndirectionSRV;
+				}
 
 				PassParameters->RWCurrentReservoirs = GraphBuilder.CreateUAV(ReservoirsA);
 				PassParameters->RWExtraBounces = GraphBuilder.CreateUAV(ExtraBouncesA);
 
 				FReSTIRCandidateEvaluateSurfaceBouncesRGS::FPermutationDomain Permutation;
+				Permutation.Set<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FDeferSurfaceBouncesUseIndirection>(CVarHVPTReSTIRDeferSurfaceBouncesSorting.GetValueOnRenderThread());
 				Permutation.Set<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FUseSER>(HVPT::ShouldUseSER());
 				Permutation.Set<FReSTIRCandidateEvaluateSurfaceBouncesRGS::FDebugOutputEnabled>(State.DebugFlags& HVPT_DEBUG_FLAG_ENABLE);
 				AddRaytracingPass<FReSTIRCandidateEvaluateSurfaceBouncesRGS>(
@@ -1175,6 +1270,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 					BufferIndex = HVPT::Private::SortBufferIndirect(
 						GraphBuilder,
 						SortingPingPongBuffers,
+						{},
 						BufferIndex,
 						IndirectionBufferAllocator,
 						0,

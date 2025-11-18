@@ -596,6 +596,13 @@ Buffer<uint> InOffsets;
 /** Output buffer for sorted keys. */
 RWBuffer<uint> OutKeys;
 
+#if RADIX_SORT_VALUES
+/** Input values to be transferred with keys. */
+Buffer<uint> InValues;
+/** Output buffer for sorted values. */
+RWBuffer<uint> OutValues;
+#endif
+
 /** Parameters. */
 uint RadixShift;
 StructuredBuffer<FRadixSortParameters> RadixSortParameterBuffer;
@@ -883,6 +890,37 @@ void HVPT_RadixSortDownsweepCS(
 			OutKeys[GlobalScatterIndex] = Keys[KeyIndex];
 		}
 
+#if RADIX_SORT_VALUES
+		// Load values.
+		[unroll]
+		for ( KeyIndex = 0; KeyIndex < KEYS_PER_LOOP; ++KeyIndex )
+		{
+			Keys[KeyIndex] = InValues[GroupKeyBegin + ThreadId * KEYS_PER_LOOP + KeyIndex];
+		}
+
+		// Release LocalScratch so values can be scattered to local memory.
+		GroupMemoryBarrierWithGroupSync();
+
+		// Scatter to local memory.
+		ScatterLocal( ThreadId, Keys, KeyOffsets );
+		
+		// Obtain coalesced values.
+		[unroll]
+		for ( KeyIndex = 0; KeyIndex < KEYS_PER_LOOP; ++KeyIndex )
+		{
+			Keys[KeyIndex] = LocalScratch[ThreadId * KEYS_PER_LOOP + KeyIndex];
+		}
+
+		// Scatter values to global memory.
+		[unroll]
+		for ( KeyIndex = 0; KeyIndex < KEYS_PER_LOOP; ++KeyIndex )
+		{
+			const uint Digit = Digits[KeyIndex];
+			const uint GlobalScatterIndex = LocalOffsets[Digit] + ThreadId * KEYS_PER_LOOP + KeyIndex - LocalTotals[Digit + DIGIT_SCAN_PADDING - 1];
+			OutValues[GlobalScatterIndex] = Keys[KeyIndex];
+		}
+#endif
+
 		// Release LocalOffsets so it can be updated.
 		GroupMemoryBarrierWithGroupSync();
 
@@ -939,6 +977,47 @@ void HVPT_RadixSortDownsweepCS(
 				OutKeys[GlobalScatterIndex] = Keys[KeyIndex];
 			}
 		}
+
+#if RADIX_SORT_VALUES
+		// Load values.
+		[unroll]
+		for ( KeyIndex = 0; KeyIndex < KEYS_PER_LOOP; ++KeyIndex )
+		{
+			if ( ThreadId * KEYS_PER_LOOP + KeyIndex < Parameters.ExtraKeyCount )
+			{
+				Keys[KeyIndex] = InValues[GroupKeyBegin + ThreadId * KEYS_PER_LOOP + KeyIndex];
+			}
+			else
+			{
+				Keys[KeyIndex] = 0x0BADF00D;
+			}
+		}
+
+		// Release LocalScratch so values can be scattered to local memory.
+		GroupMemoryBarrierWithGroupSync();
+
+		// Scatter to local memory.
+		ScatterLocal( ThreadId, Keys, KeyOffsets );
+		
+		// Obtain coalesced values.
+		[unroll]
+		for ( KeyIndex = 0; KeyIndex < KEYS_PER_LOOP; ++KeyIndex )
+		{
+			Keys[KeyIndex] = LocalScratch[ThreadId * KEYS_PER_LOOP + KeyIndex];
+		}
+
+		// Scatter values to global memory.
+		[unroll]
+		for ( KeyIndex = 0; KeyIndex < KEYS_PER_LOOP; ++KeyIndex )
+		{
+			if ( ThreadId * KEYS_PER_LOOP + KeyIndex < Parameters.ExtraKeyCount )
+			{
+				const uint Digit = Digits[KeyIndex];
+				const uint GlobalScatterIndex = LocalOffsets[Digit] + ThreadId * KEYS_PER_LOOP + KeyIndex - LocalTotals[Digit + DIGIT_SCAN_PADDING - 1];
+				OutValues[GlobalScatterIndex] = Keys[KeyIndex];
+			}
+		}
+#endif
 	}
 }
 
