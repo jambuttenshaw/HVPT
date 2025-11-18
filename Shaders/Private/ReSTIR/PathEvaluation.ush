@@ -143,7 +143,7 @@ float3 HVPT_EvaluateF(
 	FVolumeShadedResult Properties = HVPT_GetDensity(TranslatedWorldPos);
 
 	// Calculate visibility along primary ray
-	F *= HVPT_CalculateTransmittance<ShadingQuality>(Ray, RandSequence);
+	//F *= HVPT_CalculateTransmittance<ShadingQuality>(Ray, RandSequence);
 
 	if (!any(F > 0.0f))
 	{
@@ -178,7 +178,8 @@ float3 HVPT_EvaluateF(
 		// Calculate transmittance along ray
 		float3 Transmittance = HVPT_CalculateTransmittance<ShadingQuality>(Ray, RandSequence);
 
-		F *= Transmittance * Properties.SigmaSHG * Phase;
+		//F *= Transmittance * Properties.SigmaSHG * Phase;
+		F *= Properties.SigmaSHG * Phase;
 
 		// Get properties at new destination point of ray
 		TranslatedWorldPos = Ray.Origin + Ray.TMax * Ray.Direction;
@@ -189,7 +190,6 @@ float3 HVPT_EvaluateF(
 	// Surface hits are only possible in multi-bounce setups, as no surface hits are considered for primary rays.
 	if (bSurfaceHit)
 	{
-		// Handle surface hit
 		// Trace ray to surface
 		Ray.TMin = 0.0f;
 		Ray.TMax = POSITIVE_INFINITY;
@@ -197,7 +197,6 @@ float3 HVPT_EvaluateF(
 
 		if (Reservoir.GetEmissionPath())
 		{
-			// TODO: Do I need to include geometry term G = 1 / (z * z)?
 			F *= MaterialPayload.Radiance;
 		}
 		else
@@ -212,7 +211,7 @@ float3 HVPT_EvaluateF(
 			FMaterialEval MaterialEval = EvalMaterial(-Ray.Direction, LightSample.Direction, Payload, float2(1.0f, 0.0f));
 
 			// Trace visibility ray
-			float3 Visibility = HVPT_CalculateLightVisibility<ShadingQuality>(TranslatedWorldPos, LightSample, RandSequence);
+			float3 Visibility = HVPT_CalculateLightVisibility<ShadingQuality>(Payload.TranslatedWorldPos + 0.001f * Payload.WorldNormal, LightSample, RandSequence);
 
 			F *= Visibility * MaterialEval.Weight * MaterialEval.Pdf * LightRadiance;
 		}
@@ -226,7 +225,7 @@ float3 HVPT_EvaluateF(
 		if (Reservoir.GetEmissionPath())
 		{
 			float3 SigmaA = (Properties.SigmaT - Properties.SigmaSHG);
-			F *= /*SigmaA * */Properties.Emission;
+			F *= SigmaA * Properties.Emission;
 		}
 		else
 		{
@@ -236,158 +235,7 @@ float3 HVPT_EvaluateF(
 			float3 LightRadiance = LightSample.RadianceOverPdf * LightSample.Pdf;
 
 			float Phase = HenyeyGreensteinPhase(Properties.PhaseG, dot(-Ray.Direction, LightSample.Direction));
-			float3 ScatterVisibility = HVPT_CalculateLightVisibility<ShadingQuality>(TranslatedWorldPos, LightSample, RandSequence);
 
-			F *= ScatterVisibility * Properties.SigmaSHG * Phase * LightRadiance;
-		}
-	}
-
-	return F;
-}
-
-
-FVolumeShadedResult HVPT_GetOrthoVoxelGridDensity_Debug(float3 TranslatedWorldPos, inout float3 Debug)
-{
-	float3 SigmaT = 0.0;
-	float3 Scattering = 0.0;
-	float3 Emission = 0.0;
-
-	uint LinearBottomLevelVoxelPos;
-	if (HVPT_GetOrthoVoxelGridLinearBottomLevelVoxelPos(TranslatedWorldPos, LinearBottomLevelVoxelPos))
-	{
-		SigmaT = GetExtinction(HVPT_OrthoGrid.ExtinctionGridBuffer[LinearBottomLevelVoxelPos]);
-		Scattering = GetScattering(HVPT_OrthoGrid.ScatteringGridBuffer[LinearBottomLevelVoxelPos]);
-		Emission = GetEmission(HVPT_OrthoGrid.EmissionGridBuffer[LinearBottomLevelVoxelPos]);
-		Debug = Scattering * 100;
-	}
-
-	FVolumeShadedResult Result = (FVolumeShadedResult) 0;
-	Result.SigmaT = SigmaT;
-	Result.SigmaSHG = Scattering;
-	Result.Emission = Emission;
-
-	return Result;
-}
-
-
-template<SHADING_QUALITY ShadingQuality>
-float3 HVPT_EvaluateF_Debug(
-	FHVPT_Reservoir Reservoir,
-#if MULTIPLE_BOUNCES
-	FHVPT_Bounce Bounces[MAX_EXTRA_BOUNCES],
-#endif
-	FRayDesc Ray,
-	inout RandomSequence RandSequence,
-	inout float3 Debug
-)
-{
-	// Target function PHat is an approximation of the real path contribution F
-	float3 F = 1.0f;
-
-	// Set TMax according to hit point of reservoir
-	Ray.TMax = Reservoir.GetDepth();
-	FVolumeIntersection VolumeIntersection = HVPT_Intersect(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
-	Ray.TMin = max(Ray.TMin, VolumeIntersection.VolumeTMin);
-	Ray.TMax = min(Ray.TMax, VolumeIntersection.VolumeTMax);
-
-	// Sample volume properties at scattering event
-	float3 TranslatedWorldPos = Ray.Origin + Ray.TMax * Ray.Direction;
-	FVolumeShadedResult Properties = HVPT_GetOrthoVoxelGridDensity_Debug(TranslatedWorldPos, Debug);
-
-	// Calculate visibility along primary ray
-	F *= HVPT_CalculateTransmittance<ShadingQuality>(Ray, RandSequence);
-
-	if (!any(F > 0.0f))
-	{
-		return 0;
-	}
-
-#if MULTIPLE_BOUNCES
-#if USE_SURFACE_CONTRIBUTIONS
-	bool bSurfaceHit = false;
-#endif
-
-	// Follow path through however many bounces it performs
-	for (uint Bounce = 0; Bounce < Reservoir.GetNumExtraBounces(); Bounce++)
-	{
-		float4 DecodedBounce = HVPT_DecodeBounce(Bounces[Bounce]);
-		float3 w_i = DecodedBounce.xyz;
-		float z_i = DecodedBounce.w;
-
-#if USE_SURFACE_CONTRIBUTIONS
-		// Should only ever be true on the last bounce
-		bSurfaceHit = z_i == POSITIVE_INFINITY;
-#endif
-
-		// Calculate phase at the vertex we are leaving
-		float Phase = HenyeyGreensteinPhase(Properties.PhaseG, dot(-Ray.Direction, w_i));
-
-		Ray = HVPT_CreateRayDesc(TranslatedWorldPos, w_i, 0.0f, z_i);
-		VolumeIntersection = HVPT_Intersect(Ray.Origin, Ray.Direction, Ray.TMin, Ray.TMax);
-		Ray.TMin = max(Ray.TMin, VolumeIntersection.VolumeTMin);
-		Ray.TMax = min(Ray.TMax, VolumeIntersection.VolumeTMax);
-
-		// Calculate transmittance along ray
-		float3 Transmittance = HVPT_CalculateTransmittance<ShadingQuality>(Ray, RandSequence);
-
-		F *= Transmittance * Properties.SigmaSHG * Phase;
-
-		// Get properties at new destination point of ray
-		TranslatedWorldPos = Ray.Origin + Ray.TMax * Ray.Direction;
-		Properties = HVPT_GetOrthoVoxelGridDensity_Debug(TranslatedWorldPos, Debug);
-	}
-
-#if USE_SURFACE_CONTRIBUTIONS
-	// Surface hits are only possible in multi-bounce setups, as no surface hits are considered for primary rays.
-	if (bSurfaceHit)
-	{
-		// Handle surface hit
-		// Trace ray to surface
-		Ray.TMin = 0.0f;
-		Ray.TMax = POSITIVE_INFINITY;
-		FMaterialClosestHitPayload MaterialPayload = HVPT_TraceMaterialRay(TLAS, Ray);
-
-		if (Reservoir.GetEmissionPath())
-		{
-			// TODO: Do I need to include geometry term G = 1 / (z * z)?
-			F *= MaterialPayload.Radiance;
-		}
-		else
-		{
-			// Sample light source
-			FPathTracingPayload Payload = HVPT_CreateSurfaceHitPayload(MaterialPayload);
-			
-			// Pick a light source to sample
-			FLightSample LightSample = SampleLight(Reservoir.GetLightId(), Reservoir.LightSample, Payload.TranslatedWorldPos, Payload.WorldNormal);
-			float3 LightRadiance = LightSample.RadianceOverPdf * LightSample.Pdf;
-
-			FMaterialEval MaterialEval = EvalMaterial(-Ray.Direction, LightSample.Direction, Payload, float2(1.0f, 0.0f));
-
-			// Trace visibility ray
-			float3 Visibility = HVPT_CalculateLightVisibility<ShadingQuality>(TranslatedWorldPos, LightSample, RandSequence);
-
-			F *= Visibility * MaterialEval.Weight * MaterialEval.Pdf * LightRadiance;
-		}
-	}
-	else
-#endif // USE_SURFACE_CONTRIBUTIONS
-#endif // MULTIPLE_BOUNCES
-	{
-
-		// Calculate illumination from light
-		if (Reservoir.GetEmissionPath())
-		{
-			float3 SigmaA = (Properties.SigmaT - Properties.SigmaSHG);
-			F *= /*SigmaA * */Properties.Emission;
-		}
-		else
-		{
-			// It is scattering path
-			// Calculate light from light source and then calculate transmittance to that light source
-			FLightSample LightSample = SampleLight(Reservoir.GetLightId(), Reservoir.LightSample, TranslatedWorldPos, 0);
-			float3 LightRadiance = LightSample.RadianceOverPdf * LightSample.Pdf;
-
-			float Phase = HenyeyGreensteinPhase(Properties.PhaseG, dot(-Ray.Direction, LightSample.Direction));
 			float3 ScatterVisibility = HVPT_CalculateLightVisibility<ShadingQuality>(TranslatedWorldPos, LightSample, RandSequence);
 
 			F *= ScatterVisibility * Properties.SigmaSHG * Phase * LightRadiance;
