@@ -1143,7 +1143,7 @@ void HVPT::RenderWithReSTIRPathTracing(
 			bool b16BitResultBuffer = CVarHVPTReSTIRMultiPassSpatialReuse16BitBuffer.GetValueOnRenderThread();
 			size_t ResultBufferElementSize = b16BitResultBuffer ? sizeof(uint16) : sizeof(uint32);
 			EPixelFormat ResultBufferFormat = b16BitResultBuffer ? PF_R16_UINT : PF_R32_UINT;
-			uint32 ResultBufferClearValue = b16BitResultBuffer ? 0xFFFF : 0xFFFFFFFF;
+			constexpr uint32 ResultBufferClearValue = 0;
 
 			// Spatial reuse in multiple passes to reduce thread divergence and share work among threads
 			// To make the memory requirements for transient buffers feasible, the number of spatial samples and spatial reuse radius have to be limited
@@ -1178,6 +1178,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 			FRDGBufferRef IndirectionBufferAllocator = GraphBuilder.CreateBuffer(
 				FRDGBufferDesc::CreateStructuredDesc(sizeof(uint32), 1), TEXT("HVPT.ReSTIR.IndirectionAllocator"));
 
+			AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(EvaluationResultsBuffer, ResultBufferFormat), 0);
+
 			FGlobalShaderMap* ShaderMap = GetGlobalShaderMap(ViewInfo.FeatureLevel);
 
 			// To make memory usage requirements reasonable (and to allow indices into buffers to fit in few enough bits),
@@ -1209,9 +1211,8 @@ void HVPT::RenderWithReSTIRPathTracing(
 					Parameters.SqrtDomainsPerReservoir = SqrtDomainsPerReservoir;
 				};
 
-				// Clear resources that need cleared (allocator + results buffer)
+				// Clear resources for this tile
 				AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(NeighbourIndicesBuffer, PF_R16_UINT), 0);
-				AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(EvaluationResultsBuffer, ResultBufferFormat), ResultBufferClearValue);
 				AddClearUAVPass(GraphBuilder, GraphBuilder.CreateUAV(IndirectionBufferAllocator), 0);
 
 				// Step 1: Choose neighbours for each reservoir.
