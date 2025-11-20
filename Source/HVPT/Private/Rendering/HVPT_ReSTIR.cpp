@@ -64,7 +64,7 @@ static TAutoConsoleVariable<int32> CVarHVPTReSTIRMultiPassSpatialReuseTileSize(
 
 static TAutoConsoleVariable<int32> CVarHVPTReSTIRMultiPassSpatialReuseSorting(
 	TEXT("r.HVPT.ReSTIR.SpatialReuse.MultiPass.Sorting"),
-	2,
+	1,
 	TEXT("Performs a radix sort on the indirection table to increase coherency of raytracing pass."
 	"	0: Sorting is disabled"
 	"	1: Rays are sorted by num bounces and whether they hit a surface only"
